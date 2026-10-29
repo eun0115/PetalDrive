@@ -152,6 +152,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
         trackTitle = v(R.id.trackTitle)
         trackArtist = v(R.id.trackArtist)
         art = v(R.id.art)
+        art.clipToOutline = true
         playBtn = v(R.id.btnPlay)
 
         mapView = v(R.id.mapView)
@@ -178,7 +179,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
         v<View>(R.id.destClear).setOnClickListener { clearDestination() }
 
         // cards
-        v<View>(R.id.mediaInfo).setOnClickListener { if (controller == null) askMediaAccess() }
         v<View>(R.id.btnPlay).setOnClickListener {
             controller?.let { c ->
                 if (c.playbackState?.state == PlaybackState.STATE_PLAYING) c.transportControls.pause()
@@ -459,9 +459,15 @@ class MainActivity : Activity(), OnMapReadyCallback {
         view.animate().cancel()
         view.alpha = 0f
         if (bitmap == null) {
+            view.scaleType = ImageView.ScaleType.CENTER_INSIDE
             view.setPadding(dp(14), dp(14), dp(14), dp(14))
             view.setImageResource(R.drawable.ic_music)
         } else {
+            view.scaleType = if (view === art) {
+                ImageView.ScaleType.CENTER_CROP
+            } else {
+                ImageView.ScaleType.FIT_CENTER
+            }
             view.setPadding(0, 0, 0, 0)
             view.setImageBitmap(bitmap)
         }
