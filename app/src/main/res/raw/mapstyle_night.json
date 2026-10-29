@@ -1,0 +1,9 @@
+[
+  { "mapFeature": "water", "options": "geometry.fill", "paint": { "color": "#0B1F33" } },
+  { "mapFeature": "landcover.natural", "options": "geometry.fill", "paint": { "color": "#13201A" } },
+  { "mapFeature": "road.highway.city", "options": "all", "paint": { "color": "#4A4A52" } },
+  { "mapFeature": "road.highway.country", "options": "all", "paint": { "color": "#4A4A52" } },
+  { "mapFeature": "road.province", "options": "all", "paint": { "color": "#3A3A42" } },
+  { "mapFeature": "road.city-arterial", "options": "geometry.fill", "paint": { "color": "#33333A" } },
+  { "mapFeature": "transit.railway", "options": "all", "paint": { "color": "#2A3A2E" } }
+]
