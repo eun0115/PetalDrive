@@ -1,0 +1,36 @@
+name: Build and upload beta APK
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build beta APK
+        run: ./gradlew assembleDebug
+
+      - name: Name release APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk PetalDrive-0.1-Beta.apk
+
+      - name: Upload APK to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" PetalDrive-0.1-Beta.apk --repo "$GITHUB_REPOSITORY" --clobber

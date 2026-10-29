@@ -12,6 +12,8 @@ All icons and colors are original; nothing from Apple is used. It is not real Ca
    Output: `app/build/outputs/apk/debug/app-debug.apk`
 4. First launch: allow location. For the Now Playing card, tap it and enable notification access for Petal Drive.
 
+Publishing a GitHub release builds the installable beta APK and attaches it to the release as `PetalDrive-0.1-Beta.apk`. It uses the debug signing configuration so the APK can be installed directly; this is for beta testing, not Play Store distribution.
+
 ## How navigation works
 
 OpenStreetMap tiles are displayed with Leaflet. A compact destination text field and **Go** button sit at the top of the map; type a place and tap **Go** or the keyboard's Search action to look it up with OpenStreetMap's Nominatim geocoder. The starting point defaults to your current location. You can also long-press the search field and then the map to choose a destination point. After a destination is selected, OSRM requests a driving route and displays the route ETA and distance at the bottom of the map. Tap **Go** to start the route on the dashboard map, centered and zoomed in on your current location. While active, the app checks accurate GPS fixes for deviation from the route and requests a new OSRM route after two consecutive fixes more than 65 m off route; rerouting is rate-limited to once every 15 seconds. **End** stops following, cancels pending route updates, and clears the active route line; the destination remains available to start again. The map stays embedded in the dashboard. This is an estimated route preview with basic off-route rerouting, not turn-by-turn guidance, and it does not launch Petal Maps.
