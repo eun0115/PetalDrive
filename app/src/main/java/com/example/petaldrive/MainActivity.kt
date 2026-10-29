@@ -8,7 +8,6 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.SeekBar
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
@@ -66,7 +65,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private lateinit var mapView: MapView
     private lateinit var dashboard: View
     private lateinit var dashboardSidePanel: LinearLayout
-    private lateinit var mediaCard: LinearLayout
     private lateinit var gridPage: View
     private lateinit var zoomCol: View
     private lateinit var destBar: View
@@ -75,7 +73,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private lateinit var trackArtist: TextView
     private lateinit var art: ImageView
     private lateinit var playBtn: ImageView
-    private lateinit var dashboardMusicProgress: SeekBar
 
     // --- map / location state
     private var map: HuaweiMap? = null
@@ -108,15 +105,8 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     private val musicHandler = Handler(Looper.getMainLooper())
     private val artworkExecutor = Executors.newSingleThreadExecutor()
-    private var draggingDashboardProgress = false
     private var requestedArtworkUri: String? = null
 
-    private val musicProgressTask = object : Runnable {
-    override fun run() {
-        updateMusicProgress()
-        musicHandler.postDelayed(this, 1000)
-    }
-}
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { pickController(it) }
     private val controllerCb = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) = renderNowPlaying()
@@ -128,28 +118,14 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private fun dp(x: Float) = (x * resources.displayMetrics.density).roundToInt()
 
     private fun updateDashboardSidePanel() {
-        if (!::dashboardSidePanel.isInitialized || !::mediaCard.isInitialized ||
-            dashboard.width == 0 || dashboard.height == 0
-        ) return
+        if (!::dashboardSidePanel.isInitialized || dashboard.width == 0) return
 
         val availableWidthDp = dashboard.width / resources.displayMetrics.density
         val sidePanelWidth = dp((availableWidthDp * 0.34f).coerceIn(200f, 560f))
         val params = dashboardSidePanel.layoutParams as LinearLayout.LayoutParams
-        val availableHeightDp = dashboard.height / resources.displayMetrics.density
-        val cardHeight = dp((availableHeightDp * 0.45f).coerceIn(220f, 360f))
-        val cardParams = mediaCard.layoutParams as LinearLayout.LayoutParams
-        var changed = false
         if (params.width != sidePanelWidth || params.weight != 0f) {
             params.width = sidePanelWidth
             params.weight = 0f
-            changed = true
-        }
-        if (cardParams.height != cardHeight || cardParams.weight != 0f) {
-            cardParams.height = cardHeight
-            cardParams.weight = 0f
-            mediaCard.layoutParams = cardParams
-        }
-        if (changed) {
             dashboardSidePanel.layoutParams = params
         }
     }
@@ -165,7 +141,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
         dashboard = v(R.id.dashboard)
         dashboardSidePanel = v(R.id.dashboardSidePanel)
-        mediaCard = v(R.id.mediaCard)
         dashboard.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             updateDashboardSidePanel()
         }
@@ -177,7 +152,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
         trackArtist = v(R.id.trackArtist)
         art = v(R.id.art)
         playBtn = v(R.id.btnPlay)
-        dashboardMusicProgress = v(R.id.dashboardMusicProgress)
 
         mapView = v(R.id.mapView)
         mapView.onCreate(savedInstanceState?.getBundle(MAP_KEY))
@@ -212,24 +186,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
         }
         v<View>(R.id.btnNext).setOnClickListener { controller?.transportControls?.skipToNext() }
         v<View>(R.id.btnPrev).setOnClickListener { controller?.transportControls?.skipToPrevious() }
-        dashboardMusicProgress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onStartTrackingTouch(seekBar: SeekBar) {
-                draggingDashboardProgress = true
-            }
-
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
-
-            override fun onStopTrackingTouch(seekBar: SeekBar) {
-                val duration = controller?.metadata
-                    ?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-                if (duration > 0) {
-                    controller?.transportControls?.seekTo(duration * seekBar.progress / 1000)
-                }
-                draggingDashboardProgress = false
-                updateMusicProgress()
-            }
-        })
-
         buildGrid()
         renderNowPlaying()
         ensureLocation()
@@ -242,12 +198,9 @@ class MainActivity : Activity(), OnMapReadyCallback {
         mapView.onResume()
         startLocationUpdates()
         hookMedia()
-        musicHandler.removeCallbacks(musicProgressTask)
-        musicHandler.post(musicProgressTask)
     }
 
     override fun onPause() {
-        musicHandler.removeCallbacks(musicProgressTask)
         stopLocationUpdates()
         unhookMedia()
         mapView.onPause()
@@ -256,7 +209,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     override fun onStop() { mapView.onStop(); super.onStop() }
     override fun onDestroy() {
-        musicHandler.removeCallbacks(musicProgressTask)
         artworkExecutor.shutdownNow()
         mapView.onDestroy()
         super.onDestroy()
@@ -602,7 +554,6 @@ private fun renderNowPlaying() {
         }
     }
 
-    updateMusicProgress()
 }
 
     private fun loadArtworkUri(uriValue: String?) {
@@ -914,8 +865,6 @@ private fun buildMusicPage() {
     page.bringToFront()
 
     renderNowPlaying()
-    musicHandler.removeCallbacks(musicProgressTask)
-    musicHandler.post(musicProgressTask)
 }
 
 private fun openMusicPage() {
@@ -948,29 +897,6 @@ private fun togglePlayback() {
         c.transportControls.pause()
     } else {
         c.transportControls.play()
-    }
-}
-
-private fun updateMusicProgress() {
-    val c = controller
-    if (c == null) {
-        if (!draggingDashboardProgress) dashboardMusicProgress.progress = 0
-        dashboardMusicProgress.isEnabled = false
-        return
-    }
-    val duration = c.metadata
-        ?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-    val state = c.playbackState
-    val position = state?.position ?: 0L
-
-    val canSeek = state?.actions?.and(PlaybackState.ACTION_SEEK_TO) != 0L
-    dashboardMusicProgress.isEnabled = duration > 0 && canSeek
-    if (!draggingDashboardProgress) {
-        dashboardMusicProgress.progress = if (duration > 0) {
-            ((position.coerceIn(0, duration) * 1000) / duration).toInt()
-        } else {
-            0
-        }
     }
 }
 
