@@ -16,11 +16,11 @@ val localProps = Properties().apply {
 }
 
 android {
-    namespace = "com.example.petaldrive"
+    namespace = "com.eun0115.petaldrive"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.petaldrive" // change to your own; it must match the app you register in AppGallery Connect
+        applicationId = "com.eun0115.petaldrive" // change to your own; it must match the app you register in AppGallery Connect
         minSdk = 26
         targetSdk = 34
         versionCode = 1
