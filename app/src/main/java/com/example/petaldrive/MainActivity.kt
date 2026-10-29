@@ -1,9 +1,6 @@
 package com.example.petaldrive
 
 import android.graphics.Color
-import android.graphics.RenderEffect
-import android.graphics.Shader
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
@@ -41,6 +38,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.huawei.hms.maps.CameraUpdateFactory
@@ -70,6 +68,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private lateinit var trackArtist: TextView
     private lateinit var art: ImageView
     private lateinit var playBtn: ImageView
+    private lateinit var dashboardMusicProgress: SeekBar
 
     // --- map / location state
     private var map: HuaweiMap? = null
@@ -95,17 +94,17 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private val listenerComp by lazy { ComponentName(this, MediaListener::class.java) }
     private var controller: MediaController? = null
     private var musicPage: FrameLayout? = null
-    private var musicBackground: ImageView? = null
     private var musicArt: ImageView? = null
     private var musicTitle: TextView? = null
     private var musicArtist: TextView? = null
     private var musicProgress: SeekBar? = null
     private var musicElapsed: TextView? = null
     private var musicRemaining: TextView? = null
-    private var musicPlay: TextView? = null
+    private var musicPlay: ImageView? = null
 
     private val musicHandler = Handler(Looper.getMainLooper())
     private var draggingProgress = false
+    private var draggingDashboardProgress = false
 
     private val musicProgressTask = object : Runnable {
     override fun run() {
@@ -126,6 +125,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
         hideSystemBars()
@@ -140,6 +140,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
         trackArtist = v(R.id.trackArtist)
         art = v(R.id.art)
         playBtn = v(R.id.btnPlay)
+        dashboardMusicProgress = v(R.id.dashboardMusicProgress)
 
         mapView = v(R.id.mapView)
         mapView.onCreate(savedInstanceState?.getBundle(MAP_KEY))
@@ -173,6 +174,23 @@ class MainActivity : Activity(), OnMapReadyCallback {
         }
         v<View>(R.id.btnNext).setOnClickListener { controller?.transportControls?.skipToNext() }
         v<View>(R.id.btnPrev).setOnClickListener { controller?.transportControls?.skipToPrevious() }
+        dashboardMusicProgress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+                draggingDashboardProgress = true
+            }
+
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
+
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                val duration = controller?.metadata
+                    ?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+                if (duration > 0) {
+                    controller?.transportControls?.seekTo(duration * seekBar.progress / 1000)
+                }
+                draggingDashboardProgress = false
+                updateMusicProgress()
+            }
+        })
 
         buildGrid()
         renderNowPlaying()
@@ -186,9 +204,12 @@ class MainActivity : Activity(), OnMapReadyCallback {
         mapView.onResume()
         startLocationUpdates()
         hookMedia()
+        musicHandler.removeCallbacks(musicProgressTask)
+        musicHandler.post(musicProgressTask)
     }
 
     override fun onPause() {
+        musicHandler.removeCallbacks(musicProgressTask)
         stopLocationUpdates()
         unhookMedia()
         mapView.onPause()
@@ -515,20 +536,19 @@ private fun renderNowPlaying() {
     // Full-screen player
     musicTitle?.text = title
     musicArtist?.text = artist
-    musicPlay?.text = if (playing) "Ⅱ" else "▶"
+    musicPlay?.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
 
     if (bitmap != null) {
         musicArt?.setImageBitmap(bitmap)
-        musicBackground?.setImageBitmap(bitmap)
     } else {
         musicArt?.setImageResource(R.drawable.ic_music)
-        musicBackground?.setImageResource(R.drawable.ic_music)
     }
 
     updateMusicProgress()
 }
 
     private fun showArt(bmp: android.graphics.Bitmap?) {
+        art.clipToOutline = true
         if (bmp != null) {
             art.setPadding(0, 0, 0, 0)
             art.setImageBitmap(bmp)
@@ -561,42 +581,25 @@ private fun buildMusicPage() {
         setBackgroundResource(R.drawable.bg_circle)
     }
 
+    fun iconButton(icon: Int, size: Int, circular: Boolean = false) =
+        ImageView(this).apply {
+            setImageResource(icon)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(size / 3), dp(size / 3), dp(size / 3), dp(size / 3))
+            if (circular) setBackgroundResource(R.drawable.bg_circle)
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.music)
+        }
+
     val page = FrameLayout(this).apply {
         setBackgroundColor(Color.rgb(20, 20, 24))
         isFocusableInTouchMode = true
     }
 
-    // Album artwork fills the background.
-    val background = ImageView(this).apply {
-        scaleType = ImageView.ScaleType.CENTER_CROP
-        alpha = 0.38f
-        setImageResource(R.drawable.ic_music)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            setRenderEffect(
-                RenderEffect.createBlurEffect(
-                    dp(30).toFloat(),
-                    dp(30).toFloat(),
-                    Shader.TileMode.CLAMP
-                )
-            )
-        }
-    }
-    page.addView(
-        background,
-        FrameLayout.LayoutParams(-1, -1)
-    )
-
-    // Dark overlay keeps text readable.
-    page.addView(
-        View(this).apply {
-            setBackgroundColor(0xB9000000.toInt())
-        },
-        FrameLayout.LayoutParams(-1, -1)
-    )
-
     val content = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(28), dp(14), dp(28), dp(18))
+        setPadding(dp(20), dp(10), dp(20), dp(12))
     }
 
     // Header
@@ -605,23 +608,26 @@ private fun buildMusicPage() {
         gravity = Gravity.CENTER_VERTICAL
     }
 
-    val close = button("‹", 38f)
-    header.addView(close, LinearLayout.LayoutParams(dp(54), dp(48)))
+    val close = iconButton(R.drawable.ic_back, 40).apply {
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        contentDescription = getString(R.string.cancel)
+    }
+    header.addView(
+        close,
+        LinearLayout.LayoutParams(dp(40), dp(48)).apply {
+            gravity = Gravity.CENTER_VERTICAL
+        }
+    )
 
-    val heading = text("NOW PLAYING", 14f, 0xFFDDDDDD.toInt()).apply {
-        gravity = Gravity.CENTER
-        letterSpacing = 0.16f
+    val heading = text("NOW PLAYING", 12f, 0xFFDDDDDD.toInt()).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        letterSpacing = 0.12f
     }
     header.addView(
         heading,
-        LinearLayout.LayoutParams(0, dp(48), 1f)
-    )
-
-    header.addView(
-        text("PETALDRIVE", 11f, 0xFFAAAAAA.toInt()).apply {
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        },
-        LinearLayout.LayoutParams(dp(100), dp(48))
+        LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+            marginStart = dp(4)
+        }
     )
 
     content.addView(
@@ -629,16 +635,10 @@ private fun buildMusicPage() {
         LinearLayout.LayoutParams(-1, dp(48))
     )
 
-    // Main row: information and controls on the left, artwork on the right.
-    val body = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-    }
-
-    val left = LinearLayout(this).apply {
+    val playerControls = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, dp(8), dp(24), dp(8))
+        gravity = Gravity.CENTER
+        setPadding(dp(12), dp(12), dp(12), dp(12))
     }
 
     val title = text("Nothing playing", 27f).apply {
@@ -646,8 +646,8 @@ private fun buildMusicPage() {
     }
     val artist = text("Start music in another app", 17f, 0xFFD0D0D0.toInt())
 
-    left.addView(title)
-    left.addView(
+    playerControls.addView(title)
+    playerControls.addView(
         artist,
         LinearLayout.LayoutParams(-1, dp(38)).apply {
             topMargin = dp(5)
@@ -678,70 +678,109 @@ private fun buildMusicPage() {
     times.addView(elapsed, LinearLayout.LayoutParams(0, dp(24), 1f))
     times.addView(remaining, LinearLayout.LayoutParams(0, dp(24), 1f))
 
-    left.addView(
+    playerControls.addView(
         progress,
         LinearLayout.LayoutParams(-1, dp(34)).apply {
             topMargin = dp(12)
         }
     )
-    left.addView(times, LinearLayout.LayoutParams(-1, dp(24)))
+    playerControls.addView(times, LinearLayout.LayoutParams(-1, dp(24)))
 
     // Transport controls
     val controls = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
+        gravity = Gravity.CENTER
     }
 
-    val shuffle = button("⤨", 25f)
-    val previous = button("|◀", 23f)
-    val play = button("▶", 28f)
-    val next = button("▶|", 23f)
-    val repeat = button("↻", 25f)
+    val shuffle = iconButton(R.drawable.ic_shuffle, 48)
+    val previous = iconButton(R.drawable.ic_skip_previous, 52)
+    val play = iconButton(
+        if (controller?.playbackState?.state == PlaybackState.STATE_PLAYING) {
+            R.drawable.ic_pause
+        } else {
+            R.drawable.ic_play
+        },
+        68,
+        circular = true
+    )
+    val next = iconButton(R.drawable.ic_skip_next, 52)
+    val repeat = iconButton(R.drawable.ic_repeat, 48)
 
-    controls.addView(shuffle, LinearLayout.LayoutParams(dp(44), dp(48)))
-    controls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+    controls.addView(shuffle, LinearLayout.LayoutParams(dp(48), dp(52)))
+    controls.addView(View(this), LinearLayout.LayoutParams(dp(12), 1))
     controls.addView(previous, LinearLayout.LayoutParams(dp(52), dp(52)))
-    controls.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
-    controls.addView(play, LinearLayout.LayoutParams(dp(66), dp(66)))
-    controls.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
+    controls.addView(View(this), LinearLayout.LayoutParams(dp(12), 1))
+    controls.addView(play, LinearLayout.LayoutParams(dp(68), dp(68)))
+    controls.addView(View(this), LinearLayout.LayoutParams(dp(12), 1))
     controls.addView(next, LinearLayout.LayoutParams(dp(52), dp(52)))
-    controls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-    controls.addView(repeat, LinearLayout.LayoutParams(dp(44), dp(48)))
+    controls.addView(View(this), LinearLayout.LayoutParams(dp(12), 1))
+    controls.addView(repeat, LinearLayout.LayoutParams(dp(48), dp(52)))
 
-    left.addView(
+    playerControls.addView(
         controls,
-        LinearLayout.LayoutParams(-1, dp(76)).apply {
+        LinearLayout.LayoutParams(-2, dp(76)).apply {
             topMargin = dp(10)
+            gravity = Gravity.CENTER_HORIZONTAL
         }
     )
 
-    body.addView(left, LinearLayout.LayoutParams(0, -1, 1.15f))
-
     val artwork = ImageView(this).apply {
-    scaleType = ImageView.ScaleType.CENTER_CROP
-    setImageResource(R.drawable.ic_music)
-
-    this.background = GradientDrawable().apply {
-        cornerRadius = dp(18).toFloat()
-        setColor(0xFF303038.toInt())
-    }
-
-    clipToOutline = true
-    contentDescription = "Album artwork"
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setImageResource(R.drawable.ic_music)
+        background = GradientDrawable().apply {
+            cornerRadius = dp(24).toFloat()
+            setColor(0xFF303038.toInt())
+        }
+        clipToOutline = true
+        contentDescription = "Album artwork"
     }
     musicArt = artwork
 
-    body.addView(
-        artwork,
-        LinearLayout.LayoutParams(0, -1, 0.85f).apply {
-            setMargins(dp(8), dp(8), 0, dp(8))
-        }
-    )
+    val artworkFrame = FrameLayout(this).apply {
+        addView(
+            artwork,
+            FrameLayout.LayoutParams(1, 1, Gravity.CENTER)
+        )
+    }
 
+    artworkFrame.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+        val side = minOf(view.width, view.height)
+        val params = artwork.layoutParams
+        if (side > 0 && (params.width != side || params.height != side)) {
+            params.width = side
+            params.height = side
+            artwork.layoutParams = params
+        }
+    }
+
+    val isPortrait = resources.configuration.orientation ==
+        android.content.res.Configuration.ORIENTATION_PORTRAIT
+    val body = LinearLayout(this).apply {
+        orientation = if (isPortrait) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        translationY = -dp(24).toFloat()
+    }
+    val artworkParams = if (isPortrait) {
+        LinearLayout.LayoutParams(-1, 0, 1f)
+    } else {
+        LinearLayout.LayoutParams(0, -1, 1f)
+    }
+    val controlsParams = if (isPortrait) {
+        LinearLayout.LayoutParams(-1, -2)
+    } else {
+        LinearLayout.LayoutParams(0, -1, 1f)
+    }
+    if (isPortrait) {
+        body.addView(artworkFrame, artworkParams)
+        body.addView(playerControls, controlsParams)
+    } else {
+        body.addView(playerControls, controlsParams)
+        body.addView(artworkFrame, artworkParams)
+    }
     content.addView(
         body,
         LinearLayout.LayoutParams(-1, 0, 1f).apply {
-            topMargin = dp(10)
+            topMargin = dp(8)
         }
     )
 
@@ -751,7 +790,6 @@ private fun buildMusicPage() {
     )
 
     // Store views for updates from the media session.
-    musicBackground = background
     musicTitle = title
     musicArtist = artist
     musicProgress = progress
@@ -856,11 +894,9 @@ private fun openMusicPage() {
 }
 
 private fun closeMusicPage() {
-    musicHandler.removeCallbacks(musicProgressTask)
     val page = musicPage ?: return
     (page.parent as? ViewGroup)?.removeView(page)
     musicPage = null
-    musicBackground = null
     musicArt = null
     musicTitle = null
     musicArtist = null
@@ -896,15 +932,29 @@ private fun formatTime(ms: Long): String {
 }
 
 private fun updateMusicProgress() {
-    val c = controller ?: return
+    val c = controller
+    if (c == null) {
+        if (!draggingDashboardProgress) dashboardMusicProgress.progress = 0
+        dashboardMusicProgress.isEnabled = false
+        return
+    }
     val duration = c.metadata
         ?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
     val state = c.playbackState
     val position = state?.position ?: 0L
 
+    val canSeek = state?.actions?.and(PlaybackState.ACTION_SEEK_TO) != 0L
+    dashboardMusicProgress.isEnabled = duration > 0 && canSeek
+    if (!draggingDashboardProgress) {
+        dashboardMusicProgress.progress = if (duration > 0) {
+            ((position.coerceIn(0, duration) * 1000) / duration).toInt()
+        } else {
+            0
+        }
+    }
     if (!draggingProgress && duration > 0) {
         musicProgress?.apply {
-            isEnabled = state?.actions?.and(PlaybackState.ACTION_SEEK_TO) != 0L
+            isEnabled = canSeek
             progress = ((position.coerceIn(0, duration) * 1000) / duration).toInt()
         }
         musicElapsed?.text = formatTime(position)
