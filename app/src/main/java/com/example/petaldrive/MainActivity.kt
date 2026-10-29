@@ -1,6 +1,9 @@
 package com.example.petaldrive
 
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
@@ -49,7 +52,10 @@ import com.huawei.hms.maps.model.LatLng
 import com.huawei.hms.maps.model.MapStyleOptions
 import com.huawei.hms.maps.model.Marker
 import com.huawei.hms.maps.model.MarkerOptions
+import java.io.IOException
+import java.net.URL
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : Activity(), OnMapReadyCallback {
@@ -59,6 +65,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
     // --- views
     private lateinit var mapView: MapView
     private lateinit var dashboard: View
+    private lateinit var dashboardSidePanel: LinearLayout
     private lateinit var gridPage: View
     private lateinit var zoomCol: View
     private lateinit var destBar: View
@@ -103,8 +110,10 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private var musicPlay: ImageView? = null
 
     private val musicHandler = Handler(Looper.getMainLooper())
+    private val artworkExecutor = Executors.newSingleThreadExecutor()
     private var draggingProgress = false
     private var draggingDashboardProgress = false
+    private var requestedArtworkUri: String? = null
 
     private val musicProgressTask = object : Runnable {
     override fun run() {
@@ -120,6 +129,20 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     private fun <T : View> v(id: Int): T = findViewById(id)
     private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
+    private fun dp(x: Float) = (x * resources.displayMetrics.density).roundToInt()
+
+    private fun updateDashboardSidePanel() {
+        if (!::dashboardSidePanel.isInitialized || dashboard.width == 0) return
+
+        val availableWidthDp = dashboard.width / resources.displayMetrics.density
+        val sidePanelWidth = dp((availableWidthDp * 0.34f).coerceIn(200f, 560f))
+        val params = dashboardSidePanel.layoutParams as LinearLayout.LayoutParams
+        if (params.width != sidePanelWidth || params.weight != 0f) {
+            params.width = sidePanelWidth
+            params.weight = 0f
+            dashboardSidePanel.layoutParams = params
+        }
+    }
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -131,6 +154,10 @@ class MainActivity : Activity(), OnMapReadyCallback {
         hideSystemBars()
 
         dashboard = v(R.id.dashboard)
+        dashboardSidePanel = v(R.id.dashboardSidePanel)
+        dashboard.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateDashboardSidePanel()
+        }
         gridPage = v(R.id.gridPage)
         zoomCol = v(R.id.zoomCol)
         destBar = v(R.id.destBar)
@@ -217,7 +244,12 @@ class MainActivity : Activity(), OnMapReadyCallback {
     }
 
     override fun onStop() { mapView.onStop(); super.onStop() }
-    override fun onDestroy() { musicHandler.removeCallbacks(musicProgressTask); mapView.onDestroy(); super.onDestroy() }
+    override fun onDestroy() {
+        musicHandler.removeCallbacks(musicProgressTask)
+        artworkExecutor.shutdownNow()
+        mapView.onDestroy()
+        super.onDestroy()
+    }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -435,26 +467,31 @@ class MainActivity : Activity(), OnMapReadyCallback {
     }
 
     private fun makeTile(t: Tile): View {
+        val scale = (resources.configuration.smallestScreenWidthDp / 700f).coerceIn(1f, 1.6f)
+        val iconSize = dp(72f * scale)
         val icon = ImageView(this).apply {
             setImageResource(t.icon)
-            setPadding(dp(18), dp(18), dp(18), dp(18))
+            val iconPadding = dp(18f * scale)
+            setPadding(iconPadding, iconPadding, iconPadding, iconPadding)
             background = GradientDrawable().apply {
-                cornerRadius = dp(22).toFloat()
+                cornerRadius = dp(22f * scale).toFloat()
                 setColor(t.color)
             }
-            layoutParams = LinearLayout.LayoutParams(dp(72), dp(72))
+            layoutParams = LinearLayout.LayoutParams(iconSize, iconSize)
         }
         val label = TextView(this).apply {
             setText(t.label)
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 13f
+            textSize = 13f * scale
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(6f * scale), 0, 0)
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            val horizontalPadding = dp(14f * scale)
+            val verticalPadding = dp(10f * scale)
+            setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding)
             addView(icon)
             addView(label)
             setOnClickListener { t.action() }
@@ -522,6 +559,12 @@ private fun renderNowPlaying() {
 
     val bitmap = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
         ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+        ?: md?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+        ?: md?.description?.iconBitmap
+    val artworkUri = md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+        ?: md?.getString(MediaMetadata.METADATA_KEY_ART_URI)
+        ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+        ?: md?.description?.iconUri?.toString()
 
     trackTitle.text = title
     trackArtist.text = artist
@@ -539,13 +582,58 @@ private fun renderNowPlaying() {
     musicPlay?.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
 
     if (bitmap != null) {
+        requestedArtworkUri = null
         musicArt?.setImageBitmap(bitmap)
     } else {
-        musicArt?.setImageResource(R.drawable.ic_music)
+        loadArtworkUri(artworkUri)
+        if (artworkUri.isNullOrBlank()) {
+            requestedArtworkUri = null
+            musicArt?.setImageResource(R.drawable.ic_music)
+        }
     }
 
     updateMusicProgress()
 }
+
+    private fun loadArtworkUri(uriValue: String?) {
+        if (uriValue.isNullOrBlank() || requestedArtworkUri == uriValue) return
+        requestedArtworkUri = uriValue
+        val uri = Uri.parse(uriValue)
+        if (uri.scheme !in setOf("content", "android.resource", "https")) {
+            Log.w(TAG, "Unsupported album artwork URI scheme: ${uri.scheme}")
+            return
+        }
+        musicArt?.setImageResource(R.drawable.ic_music)
+
+        artworkExecutor.execute {
+            val bitmap = try {
+                if (uri.scheme == "https") {
+                    val connection = URL(uriValue).openConnection().apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                    }
+                    connection.getInputStream().use { BitmapFactory.decodeStream(it) }
+                } else {
+                    contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "Unable to load album artwork from media session URI", e)
+                null
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Unable to load album artwork from media session URI", e)
+                null
+            }
+            if (bitmap == null) {
+                Log.w(TAG, "Media session artwork URI returned no image")
+                return@execute
+            }
+            musicHandler.post {
+                if (requestedArtworkUri != uriValue) return@post
+                showArt(bitmap)
+                musicArt?.setImageBitmap(bitmap)
+            }
+        }
+    }
 
     private fun showArt(bmp: android.graphics.Bitmap?) {
         art.clipToOutline = true
@@ -963,6 +1051,7 @@ private fun updateMusicProgress() {
 }
 
     companion object {
+        private const val TAG = "PetalDrive"
         private const val MAP_KEY = "MapViewBundleKey"
         private const val REQ_LOCATION = 1001
     }
