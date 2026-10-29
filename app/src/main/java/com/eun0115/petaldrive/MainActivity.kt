@@ -112,6 +112,8 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private var utilityBody: FrameLayout? = null
     private var utilityScreen: String? = null
     private var phoneTabContainer: FrameLayout? = null
+    private var dialerTabView: TextView? = null
+    private var recentsTabView: TextView? = null
     private var phoneTab = PhoneTab.DIALER
     private var dialInput: EditText? = null
     private var pendingCallNumber: String? = null
@@ -597,7 +599,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
         header.addView(back, LinearLayout.LayoutParams(dp(48), dp(48)))
         val heading = TextView(this).apply {
             text = title
-            textSize = 22f
+            textSize = 18f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_VERTICAL
             setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -636,6 +638,8 @@ class MainActivity : Activity(), OnMapReadyCallback {
                     utilityBody = null
                     utilityScreen = null
                     phoneTabContainer = null
+                    dialerTabView = null
+                    recentsTabView = null
                     dialInput = null
                 }
                 page.alpha = 1f
@@ -651,19 +655,43 @@ class MainActivity : Activity(), OnMapReadyCallback {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        val tabs = LinearLayout(this).apply {
+        val tabContainer = FrameLayout(this)
+        content.addView(tabContainer, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val tabBarFrame = FrameLayout(this)
+        val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(0xFF171719.toInt())
+                setStroke(dp(1), 0xFF343438.toInt())
+            }
+            setPadding(dp(4), dp(4), dp(4), dp(4))
         }
         val dialerTab = utilityTab("Dialer")
         val recentsTab = utilityTab("Recents")
-        tabs.addView(dialerTab, LinearLayout.LayoutParams(0, dp(52), 1f))
-        tabs.addView(recentsTab, LinearLayout.LayoutParams(0, dp(52), 1f))
-        content.addView(tabs, LinearLayout.LayoutParams(-1, dp(52)))
+        tabBar.addView(dialerTab, LinearLayout.LayoutParams(0, -1, 1f))
+        tabBar.addView(recentsTab, LinearLayout.LayoutParams(0, -1, 1f))
+        tabBarFrame.addView(
+            tabBar,
+            FrameLayout.LayoutParams(dp(300), dp(48), Gravity.CENTER)
+        )
+        tabBarFrame.addOnLayoutChangeListener { frame, _, _, _, _, _, _, _, _ ->
+            val maxWidth = (frame.width - dp(32)).coerceAtLeast(dp(180))
+            val params = tabBar.layoutParams as FrameLayout.LayoutParams
+            val width = minOf(dp(300), maxWidth)
+            if (params.width != width) {
+                params.width = width
+                tabBar.layoutParams = params
+            }
+        }
+        content.addView(tabBarFrame, LinearLayout.LayoutParams(-1, dp(56)))
 
-        val tabContainer = FrameLayout(this)
-        content.addView(tabContainer, LinearLayout.LayoutParams(-1, 0, 1f))
         body.addView(content, FrameLayout.LayoutParams(-1, -1))
         phoneTabContainer = tabContainer
+        dialerTabView = dialerTab
+        recentsTabView = recentsTab
         dialerTab.setOnClickListener { showPhoneTab(PhoneTab.DIALER) }
         recentsTab.setOnClickListener { showPhoneTab(PhoneTab.RECENTS) }
         showPhoneTab(phoneTab)
@@ -671,15 +699,18 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     private fun utilityTab(label: String) = TextView(this).apply {
         text = label
-        textSize = 16f
+        textSize = 14f
         gravity = Gravity.CENTER
-        setTextColor(Color.WHITE)
+        setTextColor(0xFF929298.toInt())
         isClickable = true
         isFocusable = true
+        background = GradientDrawable().apply { cornerRadius = dp(12).toFloat() }
     }
 
     private fun showPhoneTab(tab: PhoneTab) {
         phoneTab = tab
+        updatePhoneTabIndicator(dialerTabView, tab == PhoneTab.DIALER)
+        updatePhoneTabIndicator(recentsTabView, tab == PhoneTab.RECENTS)
         val container = phoneTabContainer ?: return
         container.removeAllViews()
         if (tab == PhoneTab.DIALER) {
@@ -708,39 +739,50 @@ class MainActivity : Activity(), OnMapReadyCallback {
         showCallLog(container)
     }
 
+    private fun updatePhoneTabIndicator(tab: View?, selected: Boolean) {
+        val button = tab as? TextView ?: return
+        button.setTextColor(if (selected) Color.WHITE else 0xFF929298.toInt())
+        button.background = GradientDrawable().apply {
+            cornerRadius = dp(12).toFloat()
+            if (selected) setColor(0xFF343438.toInt()) else setColor(Color.TRANSPARENT)
+        }
+    }
+
     private fun showDialer(container: FrameLayout) {
         val dialer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(12), dp(16), dp(12))
         }
-        val dialerWidth = (resources.displayMetrics.widthPixels - dp(48)).coerceAtMost(dp(440))
-        container.addView(
-            dialer,
-            FrameLayout.LayoutParams(dialerWidth, -1, Gravity.CENTER)
-        )
+        container.addView(dialer, FrameLayout.LayoutParams(-1, -1))
 
         val number = EditText(this).apply {
-            hint = "Enter phone number"
+            hint = "Phone number"
             inputType = android.text.InputType.TYPE_CLASS_PHONE
-            textSize = 26f
-            gravity = Gravity.CENTER
+            textSize = 22f
+            gravity = Gravity.CENTER_VERTICAL
             isSingleLine = true
             showSoftInputOnFocus = false
             setTextColor(Color.WHITE)
             setHintTextColor(0xFF88888E.toInt())
+            setPadding(0, dp(8), 0, dp(8))
         }
         dialInput = number
-        dialer.addView(number, LinearLayout.LayoutParams(-1, dp(62)))
 
         val keypad = GridLayout(this).apply {
             columnCount = 3
             rowCount = 4
         }
+        val keypadPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        dialer.addView(keypadPanel, LinearLayout.LayoutParams(0, -1, 1f))
         val keys = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#")
-        keys.forEach { key ->
+        keys.forEachIndexed { index, key ->
             val keyView = utilityButton(key, 0xFF28282C.toInt()).apply {
-                textSize = 24f
+                textSize = 26f
+                background = null
                 setOnClickListener {
                     val cursor = number.selectionStart.coerceAtLeast(0)
                     number.text.insert(cursor, key)
@@ -748,22 +790,54 @@ class MainActivity : Activity(), OnMapReadyCallback {
                 }
             }
             val params = GridLayout.LayoutParams(
-                GridLayout.spec(GridLayout.UNDEFINED, 1f),
-                GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                GridLayout.spec(index / 3, 1f),
+                GridLayout.spec(index % 3, 1f)
             ).apply {
                 width = 0
-                height = dp(54)
-                setMargins(dp(4), dp(3), dp(4), dp(3))
+                height = 0
+                setMargins(dp(5), dp(4), dp(5), dp(4))
             }
             keypad.addView(keyView, params)
+            keyView.addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
+                val cellDp = minOf(right - left, bottom - top) / resources.displayMetrics.density
+                keyView.textSize = (cellDp * 0.34f).coerceIn(18f, 28f)
+            }
         }
-        dialer.addView(keypad, LinearLayout.LayoutParams(-1, 0, 1f))
+        keypadPanel.addView(
+            keypad,
+            LinearLayout.LayoutParams(-1, 0, 1f)
+        )
 
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        val numberPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), 0, dp(4), 0)
         }
+        dialer.addView(numberPanel, LinearLayout.LayoutParams(dp(220), -1))
+        dialer.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            val availableWidth = view.width - view.paddingLeft - view.paddingRight
+            if (availableWidth > 0) {
+                val availableDp = availableWidth / resources.displayMetrics.density
+                val panelMaxDp = (availableDp - 180f).coerceAtLeast(100f)
+                val panelWidthDp = (availableDp * 0.32f)
+                    .coerceAtMost(minOf(panelMaxDp, 320f))
+                    .coerceAtLeast(minOf(140f, availableDp * 0.28f))
+                val panelParams = numberPanel.layoutParams as LinearLayout.LayoutParams
+                val panelWidth = dp(panelWidthDp)
+                if (panelParams.width != panelWidth || panelParams.weight != 0f) {
+                    panelParams.width = panelWidth
+                    panelParams.weight = 0f
+                    numberPanel.layoutParams = panelParams
+                }
+                number.textSize = (panelWidthDp * 0.075f).coerceIn(18f, 26f)
+            }
+        }
+        numberPanel.addView(number, LinearLayout.LayoutParams(-1, dp(64)))
+
         val delete = utilityButton("Delete", 0xFF28282C.toInt())
+        delete.textSize = 13f
+        delete.background = null
+        delete.setTextColor(0xFFB8B8BE.toInt())
         delete.setOnClickListener {
             val cursor = number.selectionStart
             if (cursor > 0) {
@@ -772,6 +846,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
             }
         }
         val call = utilityButton("Call", 0xFF30D158.toInt())
+        call.textSize = 16f
         call.setOnClickListener {
             val enteredNumber = number.text.toString().trim()
             if (enteredNumber.isBlank()) {
@@ -780,13 +855,19 @@ class MainActivity : Activity(), OnMapReadyCallback {
                 confirmCall(enteredNumber)
             }
         }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
         actions.addView(delete, LinearLayout.LayoutParams(0, dp(56), 1f).apply {
-            marginEnd = dp(8)
+            marginEnd = dp(6)
         })
         actions.addView(call, LinearLayout.LayoutParams(0, dp(56), 1f).apply {
-            marginStart = dp(8)
+            marginStart = dp(6)
         })
-        dialer.addView(actions, LinearLayout.LayoutParams(-1, dp(56)))
+        numberPanel.addView(actions, LinearLayout.LayoutParams(-1, dp(56)).apply {
+            topMargin = dp(12)
+        })
     }
 
     private fun showCallLog(container: FrameLayout) {
@@ -841,28 +922,27 @@ class MainActivity : Activity(), OnMapReadyCallback {
                 }
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(16), dp(12), dp(16), dp(12))
-                    background = utilityCardBackground()
+                    setPadding(dp(8), dp(10), dp(8), dp(10))
                     isClickable = true
                     isFocusable = true
                     setOnClickListener {
                         if (phoneNumber.isNotBlank()) confirmCall(phoneNumber)
                     }
                 }
-                row.addView(utilityText(contact, 18f, bold = true))
+                row.addView(utilityText(contact, 16f, bold = true))
                 row.addView(
                     utilityText(
                         "$phoneNumber  ·  $callType  ·  ${
                             DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
                                 .format(Date(timestamp))
                         }",
-                        13f,
+                        12f,
                         0xFFB8B8BE.toInt()
                     )
                 )
-                list.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
-                    bottomMargin = dp(8)
-                })
+                list.addView(row, LinearLayout.LayoutParams(-1, -2))
+                val divider = View(this).apply { setBackgroundColor(0xFF303034.toInt()) }
+                list.addView(divider, LinearLayout.LayoutParams(-1, dp(1)))
                 count++
             }
         }
