@@ -1,37 +1,26 @@
 # Petal Drive
 
-A CarPlay-style dashboard for Android that uses **Petal Maps** (Huawei Map Kit) instead of Apple/Google maps.
-Landscape-only: left rail (clock, speed, shortcuts), map card, "Where to?" card, Now Playing card, and an app-grid home screen.
+A CarPlay-style dashboard for Android with an embedded **Leaflet + OpenStreetMap** map and OSRM driving-route previews.
+Landscape-only: clock/status and shortcuts appear in a left rail on phones and a bottom bar on tablets and widescreens, alongside the map card, "Where to?" card, Now Playing card, and an app-grid home screen.
 All icons and colors are original; nothing from Apple is used. It is not real CarPlay and can't show up on a car screen through Apple's protocol.
 
 ## Build the APK
 
 1. Install Android Studio (Hedgehog or newer, JDK 17 is bundled) and open this folder. Let Gradle sync.
-2. Set up Petal Maps (one time):
-   - Create a Huawei developer account and a project + app in AppGallery Connect.
-   - Use your own package name: change `applicationId` in `app/build.gradle.kts` and register the same one.
-   - Run `./gradlew signingReport`, copy the SHA-256 of your debug (and later release) key, add it to the app in AppGallery Connect.
-   - Enable **Map Kit** for the project, then download `agconnect-services.json` into `app/`.
-   - Copy `local.properties.example` lines into `local.properties` and set `PETAL_API_KEY` to the `api_key` value from that JSON.
+2. No map API key or AppGallery Connect setup is required. The map tiles and route previews need an internet connection.
 3. Build: **Build > Build APK(s)**, or `./gradlew assembleDebug`.
    Output: `app/build/outputs/apk/debug/app-debug.apk`
-4. The device needs **HMS Core** installed for Map Kit to render the map.
-5. First launch: allow location. For the Now Playing card, tap it and enable notification access for Petal Drive.
+4. First launch: allow location. For the Now Playing card, tap it and enable notification access for Petal Drive.
 
 ## How navigation works
 
-Map Kit draws the map, your location, and a dropped pin (long-press the map). It does not do turn-by-turn.
-**Go** hands the route to the Petal Maps app with `mapapp://navigation?saddr=…&daddr=…&type=drive`
-and falls back to `https://www.petalmaps.com/navigation/…` if the app isn't installed.
-"Where to?" opens a Petal Maps web search the same way.
-In-app routing would need Huawei's Navigation/Directions API on top; that's a natural next step.
+OpenStreetMap tiles are displayed with Leaflet. A compact destination text field and **Go** button sit at the top of the map; type a place and tap **Go** or the keyboard's Search action to look it up with OpenStreetMap's Nominatim geocoder. The starting point defaults to your current location. You can also long-press the search field and then the map to choose a destination point. After a destination is selected, OSRM requests a driving route and displays the route ETA and distance at the bottom of the map. Tap **Go** to start the route on the dashboard map, centered and zoomed in on your current location. While active, the app checks accurate GPS fixes for deviation from the route and requests a new OSRM route after two consecutive fixes more than 65 m off route; rerouting is rate-limited to once every 15 seconds. **End** stops following, cancels pending route updates, and clears the active route line; the destination remains available to start again. The map stays embedded in the dashboard. This is an estimated route preview with basic off-route rerouting, not turn-by-turn guidance, and it does not launch Petal Maps.
+
+The dashboard shows battery percentage and, after you tap the signal indicator and grant Phone permission, your cellular network type and signal bars.
+
+The app uses the public OpenStreetMap tile service, Nominatim geocoder, and OSRM demo router. Nominatim searches are explicit (not autocomplete) and rate-limited to one request per second. These public endpoints have usage policies and no availability guarantee; use hosted providers or your own services for production traffic. OpenStreetMap attribution is shown on the map. Leaflet is bundled under its BSD 2-Clause license in `app/src/main/assets/map/leaflet-license.txt`.
 
 ## Known rough edges
 
-- Never compiled or run by the person who wrote it (no Android SDK was available). Expect to fix a typo or API-name mismatch on first sync.
-- `res/raw/mapstyle_night.json` only recolors map features whose names appear in Huawei's docs, so the base map will be only partly dark.
-  For a full night look, make a style in Petal Maps Studio, publish it, and put the ID in `PETAL_STYLE_ID`.
-- The `mapapp://` deep link comes from a 2021 developer answer; test it against your installed Petal Maps version.
-- Petal Maps coverage varies by country; check that your region is supported before relying on it.
-- The map card's rounded corners may render square depending on how the SDK draws its surface.
+- Map tiles and route lookup are unavailable offline.
 - Installed as launcher: Petal Drive also registers as a home app, so you can choose it as the default on an Android head unit.

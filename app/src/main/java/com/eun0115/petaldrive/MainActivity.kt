@@ -8,13 +8,19 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
@@ -26,14 +32,25 @@ import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
+import android.os.Build
+import android.os.BatteryManager
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyDisplayInfo
+import android.telephony.PhoneStateListener
+import android.telephony.SignalStrength
+import android.telephony.TelephonyManager
 import android.provider.Settings
 import android.provider.CallLog
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.GridLayout
 import android.widget.ImageView
@@ -45,48 +62,74 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.huawei.hms.maps.CameraUpdateFactory
-import com.huawei.hms.maps.HuaweiMap
-import com.huawei.hms.maps.MapView
-import com.huawei.hms.maps.OnMapReadyCallback
-import com.huawei.hms.maps.model.LatLng
-import com.huawei.hms.maps.model.MapStyleOptions
-import com.huawei.hms.maps.model.Marker
-import com.huawei.hms.maps.model.MarkerOptions
+import androidx.webkit.WebViewAssetLoader
+import org.json.JSONException
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.IOException
+import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.DateFormat
 import java.util.Locale
 import java.util.Date
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import kotlin.math.roundToInt
+import kotlin.math.hypot
 
-class MainActivity : Activity(), OnMapReadyCallback {
+class MainActivity : Activity() {
 
     private data class Tile(val label: Int, val icon: Int, val color: Int, val action: () -> Unit)
+    private data class RoutePoint(val latitude: Double, val longitude: Double)
+    private data class DrivingRoute(
+        val geometry: String,
+        val summary: String,
+        val points: List<RoutePoint>
+    )
+    private data class PlaceResult(val name: String, val latitude: Double, val longitude: Double)
     private enum class PhoneTab { DIALER, RECENTS }
+    private enum class RouteEndpoint { FROM, TO }
 
     // --- views
-    private lateinit var mapView: MapView
+    private lateinit var mapView: WebView
+    private lateinit var mapCard: FrameLayout
     private lateinit var dashboard: View
     private lateinit var dashboardSidePanel: LinearLayout
     private lateinit var gridPage: View
     private lateinit var zoomCol: View
     private lateinit var destBar: View
     private lateinit var destSub: TextView
+    private lateinit var routeToView: EditText
+    private lateinit var networkTypeView: TextView
+    private lateinit var signalBarsView: SignalBarsView
+    private lateinit var batteryPercentView: TextView
     private lateinit var trackTitle: TextView
     private lateinit var trackArtist: TextView
     private lateinit var art: ImageView
     private lateinit var playBtn: ImageView
 
     // --- map / location state
-    private var map: HuaweiMap? = null
     private var lastFix: Location? = null
-    private var destination: LatLng? = null
-    private var destMarker: Marker? = null
+    private var routeOrigin: Location? = null
+    private var routeOriginName: String? = null
+    private var destination: Location? = null
+    private var destinationName: String? = null
+    private var routeEndpointSelection: RouteEndpoint? = null
+    private var routeGeometry: String? = null
+    private var routePoints: List<RoutePoint> = emptyList()
+    private var routeSummary: String? = null
+    private var navigationActive = false
+    private var navigationStartPending = false
+    private var rerouteInProgress = false
+    private var mapPageReady = false
+    private var mapErrorShown = false
+    private var routeRequestId = 0
     private var locationGranted = false
     private var following = true
     private var firstFix = true
+    private var offRouteFixCount = 0
+    private var lastRerouteAt = 0L
 
     
 
@@ -117,10 +160,40 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private var phoneTab = PhoneTab.DIALER
     private var dialInput: EditText? = null
     private var pendingCallNumber: String? = null
-
     private val musicHandler = Handler(Looper.getMainLooper())
+    private val tripEndedHandler = Handler(Looper.getMainLooper())
+    private var tripEndedStatusClear: Runnable? = null
     private val artworkExecutor = Executors.newSingleThreadExecutor()
+    private val routeExecutor = Executors.newSingleThreadExecutor()
+    private val placeSearchExecutor = Executors.newSingleThreadExecutor()
+    private var routeRequestTask: Future<*>? = null
+    private var lastPlaceSearchAt = 0L
     private var requestedArtworkUri: String? = null
+    private var batteryReceiverRegistered = false
+    private var telephonyCallback: TelephonyCallback? = null
+    private var signalMonitoringActive = false
+    private var networkDisplayOverride = TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NONE
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            updateBatteryIndicator(intent)
+        }
+    }
+    private val phoneStateListener = object : PhoneStateListener() {
+        override fun onSignalStrengthsChanged(signalStrength: SignalStrength) {
+            super.onSignalStrengthsChanged(signalStrength)
+            signalBarsView.setLevel(signalStrength.level)
+            updateNetworkTypeLabel()
+        }
+
+        override fun onDataConnectionStateChanged(state: Int, networkType: Int) {
+            updateNetworkTypeLabel(networkType)
+        }
+
+        override fun onServiceStateChanged(serviceState: android.telephony.ServiceState?) {
+            updateNetworkTypeLabel()
+        }
+    }
 
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { pickController(it) }
     private val controllerCb = object : MediaController.Callback() {
@@ -145,6 +218,56 @@ class MainActivity : Activity(), OnMapReadyCallback {
         }
     }
 
+    private fun configureResponsiveNavigation() {
+        val configuration = resources.configuration
+        val useBottomNavigation =
+            configuration.smallestScreenWidthDp >= 600 || configuration.screenWidthDp >= 960
+        if (!useBottomNavigation) return
+
+        val root = v<LinearLayout>(R.id.dashboardRoot)
+        val rail = v<LinearLayout>(R.id.mainNavRail)
+        val content = v<FrameLayout>(R.id.dashboardContentHost)
+        root.orientation = LinearLayout.VERTICAL
+        root.removeView(rail)
+        root.removeView(content)
+        root.addView(
+            content,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            ).apply {
+                bottomMargin = dp(8)
+            }
+        )
+        rail.orientation = LinearLayout.HORIZONTAL
+        rail.gravity = Gravity.CENTER_VERTICAL
+        rail.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        val status = rail.findViewById<LinearLayout>(R.id.statusIndicators)
+        status.orientation = LinearLayout.HORIZONTAL
+        (status.layoutParams as LinearLayout.LayoutParams).apply {
+            topMargin = 0
+            marginStart = 0
+        }
+        (status.getChildAt(1).layoutParams as LinearLayout.LayoutParams).apply {
+            topMargin = 0
+            marginStart = dp(8)
+        }
+        status.requestLayout()
+        listOf(R.id.railMusic, R.id.railPhone).forEach { id ->
+            val params = rail.findViewById<View>(id).layoutParams as LinearLayout.LayoutParams
+            params.topMargin = 0
+            params.marginStart = dp(12)
+        }
+        val contentParams = content.layoutParams as LinearLayout.LayoutParams
+        contentParams.marginStart = 0
+        content.layoutParams = contentParams
+        root.addView(rail)
+    }
+
     // ------------------------------------------------------------------ lifecycle
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -153,6 +276,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
         hideSystemBars()
+        configureResponsiveNavigation()
 
         dashboard = v(R.id.dashboard)
         dashboardSidePanel = v(R.id.dashboardSidePanel)
@@ -160,9 +284,16 @@ class MainActivity : Activity(), OnMapReadyCallback {
             updateDashboardSidePanel()
         }
         gridPage = v(R.id.gridPage)
+        mapCard = v(R.id.mapCard)
+        mapCard.clipToOutline = true
+        mapCard.outlineProvider = ViewOutlineProvider.BACKGROUND
         zoomCol = v(R.id.zoomCol)
         destBar = v(R.id.destBar)
         destSub = v(R.id.destSub)
+        routeToView = v(R.id.routeTo)
+        networkTypeView = v(R.id.networkType)
+        signalBarsView = v(R.id.signalBars)
+        batteryPercentView = v(R.id.batteryPercent)
         trackTitle = v(R.id.trackTitle)
         trackArtist = v(R.id.trackArtist)
         art = v(R.id.art)
@@ -170,8 +301,9 @@ class MainActivity : Activity(), OnMapReadyCallback {
         playBtn = v(R.id.btnPlay)
 
         mapView = v(R.id.mapView)
-        mapView.onCreate(savedInstanceState?.getBundle(MAP_KEY))
-        mapView.getMapAsync(this)
+        mapView.clipToOutline = true
+        mapView.outlineProvider = ViewOutlineProvider.BACKGROUND
+        configureMapView()
 
         // left rail
         v<View>(R.id.railMaps).setOnClickListener { showDashboard() }
@@ -183,14 +315,55 @@ class MainActivity : Activity(), OnMapReadyCallback {
         }
 
         // map controls
-        v<View>(R.id.zoomIn).setOnClickListener { map?.animateCamera(CameraUpdateFactory.zoomIn()) }
-        v<View>(R.id.zoomOut).setOnClickListener { map?.animateCamera(CameraUpdateFactory.zoomOut()) }
+        v<View>(R.id.zoomIn).setOnClickListener { runMapScript("window.petalDriveMap.zoomBy(1)") }
+        v<View>(R.id.zoomOut).setOnClickListener { runMapScript("window.petalDriveMap.zoomBy(-1)") }
         v<View>(R.id.recenter).setOnClickListener {
             following = true
             lastFix?.let { center(it, 16f) }
         }
-        v<View>(R.id.destGo).setOnClickListener { destination?.let { startNavigation(it) } }
-        v<View>(R.id.destClear).setOnClickListener { clearDestination() }
+        v<View>(R.id.destGo).setOnClickListener {
+            val query = routeToView.text.toString().trim()
+            if (query.isNotEmpty() && query != destinationName) {
+                searchPlaces(query, RouteEndpoint.TO)
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .hideSoftInputFromWindow(routeToView.windowToken, 0)
+                routeToView.clearFocus()
+            } else if (destination != null && routeOriginForNavigation() != null) {
+                startRouteOnMap()
+            } else {
+                val message = if (destination == null) {
+                    R.string.route_choose_destination
+                } else {
+                    R.string.waiting_gps
+                }
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            }
+        }
+        v<View>(R.id.destEnd).setOnClickListener { stopBuiltInNavigation() }
+        v<View>(R.id.destClear).setOnClickListener { clearRouteEndpoints() }
+        routeToView.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                val query = routeToView.text.toString().trim()
+                if (query.isNotEmpty()) {
+                    searchPlaces(query, RouteEndpoint.TO)
+                    (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                        .hideSoftInputFromWindow(routeToView.windowToken, 0)
+                    routeToView.clearFocus()
+                }
+                true
+            } else {
+                false
+            }
+        }
+        routeToView.setOnLongClickListener {
+            selectRouteEndpoint(RouteEndpoint.TO)
+            Toast.makeText(this, R.string.pick_to_map, Toast.LENGTH_SHORT).show()
+            true
+        }
+        v<View>(R.id.statusIndicators).apply {
+            contentDescription = getString(R.string.enable_signal_details)
+            setOnClickListener { requestSignalPermission() }
+        }
 
         // cards
         v<View>(R.id.btnPlay).setOnClickListener {
@@ -204,13 +377,253 @@ class MainActivity : Activity(), OnMapReadyCallback {
         buildGrid()
         renderNowPlaying()
         ensureLocation()
+        updateBatteryIndicator(registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)))
+        updateNetworkTypeLabel()
+        updateDestBar()
     }
 
-    override fun onStart() { super.onStart(); mapView.onStart() }
+    private fun configureMapView() {
+        val assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+
+        mapView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = false
+            allowContentAccess = false
+        }
+        mapView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ) = assetLoader.shouldInterceptRequest(request.url)
+
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest
+            ): Boolean {
+                if (request.url.host == "appassets.androidplatform.net") return false
+                if (request.url.scheme == "https" &&
+                    request.url.host == "www.openstreetmap.org"
+                ) {
+                    openIntent(Intent(Intent.ACTION_VIEW, request.url))
+                }
+                return true
+            }
+        }
+        mapView.addJavascriptInterface(MapBridge(), "PetalDrive")
+        mapView.loadUrl("https://appassets.androidplatform.net/assets/map/index.html")
+    }
+
+    inner class MapBridge {
+        @JavascriptInterface
+        fun onMapReady() {
+            runOnUiThread {
+                mapPageReady = true
+                lastFix?.let { center(it, 16f) }
+                routeOrigin?.let { origin ->
+                    runMapScript("window.petalDriveMap.setOrigin(${origin.latitude},${origin.longitude})")
+                }
+                destination?.let { dest ->
+                    runMapScript("window.petalDriveMap.setDestination(${dest.latitude},${dest.longitude})")
+                }
+                routeGeometry?.let { runMapScript("window.petalDriveMap.setRoute($it)") }
+                mapView.postDelayed({ runMapScript("window.petalDriveMap.invalidateSize()") }, 200L)
+            }
+        }
+
+        @JavascriptInterface
+        fun onMapPointSelected(latitude: Double, longitude: Double) {
+            runOnUiThread {
+                if (latitude.isFinite() && longitude.isFinite() &&
+                    latitude in -90.0..90.0 && longitude in -180.0..180.0
+                ) {
+                    when (routeEndpointSelection ?: RouteEndpoint.TO) {
+                        RouteEndpoint.FROM -> setRouteOrigin(latitude, longitude)
+                        RouteEndpoint.TO -> setDestination(latitude, longitude)
+                    }
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onTileError() {
+            runOnUiThread {
+                if (!mapErrorShown) {
+                    mapErrorShown = true
+                    Toast.makeText(
+                        this@MainActivity,
+                        R.string.map_tiles_unavailable,
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun runMapScript(script: String) {
+        if (mapPageReady) mapView.evaluateJavascript(script, null)
+    }
+
+    private fun updateBatteryIndicator(intent: Intent?) {
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        if (level >= 0 && scale > 0) {
+            val percent = (level * 100f / scale).roundToInt().coerceIn(0, 100)
+            batteryPercentView.text = getString(R.string.battery, percent)
+            batteryPercentView.contentDescription = getString(R.string.battery_accessibility, percent)
+        }
+    }
+
+    private fun requestSignalPermission() {
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) {
+            Toast.makeText(this, R.string.network_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            startSignalMonitoring()
+            return
+        }
+        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setMessage(R.string.signal_permission_explanation)
+            .setPositiveButton(R.string.continue_label) { _, _ ->
+                requestPermissions(
+                    arrayOf(Manifest.permission.READ_PHONE_STATE),
+                    REQ_PHONE_STATE
+                )
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun startSignalMonitoring() {
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED ||
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
+        ) {
+            updateNetworkTypeLabel()
+            return
+        }
+        if (signalMonitoringActive) return
+        val telephony = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object : TelephonyCallback(),
+                    TelephonyCallback.SignalStrengthsListener,
+                    TelephonyCallback.DisplayInfoListener,
+                    TelephonyCallback.DataConnectionStateListener,
+                    TelephonyCallback.ServiceStateListener {
+                    override fun onSignalStrengthsChanged(signalStrength: SignalStrength) {
+                        signalBarsView.setLevel(signalStrength.level)
+                        updateNetworkTypeLabel()
+                    }
+
+                    override fun onDisplayInfoChanged(telephonyDisplayInfo: TelephonyDisplayInfo) {
+                        networkDisplayOverride = telephonyDisplayInfo.overrideNetworkType
+                        updateNetworkTypeLabel()
+                    }
+
+                    override fun onDataConnectionStateChanged(state: Int, networkType: Int) {
+                        updateNetworkTypeLabel(networkType)
+                    }
+
+                    override fun onServiceStateChanged(serviceState: android.telephony.ServiceState) {
+                        updateNetworkTypeLabel()
+                    }
+                }
+                telephony.registerTelephonyCallback(
+                    androidx.core.content.ContextCompat.getMainExecutor(this),
+                    callback
+                )
+                telephonyCallback = callback
+            } else {
+                telephony.listen(
+                    phoneStateListener,
+                    PhoneStateListener.LISTEN_SIGNAL_STRENGTHS or
+                        PhoneStateListener.LISTEN_DATA_CONNECTION_STATE or
+                        PhoneStateListener.LISTEN_SERVICE_STATE
+                )
+            }
+            signalMonitoringActive = true
+            updateNetworkTypeLabel(telephony.dataNetworkType)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Phone status permission was revoked", e)
+            signalBarsView.setLevel(0)
+            updateNetworkTypeLabel()
+        }
+    }
+
+    private fun stopSignalMonitoring() {
+        if (!signalMonitoringActive) return
+        val telephony = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            telephonyCallback?.let(telephony::unregisterTelephonyCallback)
+            telephonyCallback = null
+        } else {
+            telephony.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+        }
+        signalMonitoringActive = false
+    }
+
+    private fun updateNetworkTypeLabel(networkType: Int? = null) {
+        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val capabilities = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
+
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            val telephony = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            val type = networkType ?: try {
+                telephony.dataNetworkType
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Unable to read mobile network type", e)
+                TelephonyManager.NETWORK_TYPE_UNKNOWN
+            }
+            val overrideLabel = when (networkDisplayOverride) {
+                TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_ADVANCED -> "5G+"
+                TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA -> "5G"
+                TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_LTE_CA -> "4G+"
+                else -> null
+            }
+            val label = overrideLabel ?: when (type) {
+                TelephonyManager.NETWORK_TYPE_GPRS -> "G"
+                TelephonyManager.NETWORK_TYPE_EDGE -> "E"
+                TelephonyManager.NETWORK_TYPE_UMTS,
+                TelephonyManager.NETWORK_TYPE_CDMA,
+                TelephonyManager.NETWORK_TYPE_EVDO_0,
+                TelephonyManager.NETWORK_TYPE_EVDO_A,
+                TelephonyManager.NETWORK_TYPE_1xRTT,
+                TelephonyManager.NETWORK_TYPE_EVDO_B,
+                TelephonyManager.NETWORK_TYPE_EHRPD,
+                TelephonyManager.NETWORK_TYPE_HSDPA,
+                TelephonyManager.NETWORK_TYPE_HSUPA,
+                TelephonyManager.NETWORK_TYPE_HSPA -> "3G"
+                TelephonyManager.NETWORK_TYPE_HSPAP -> "H+"
+                TelephonyManager.NETWORK_TYPE_LTE -> "4G"
+                TelephonyManager.NETWORK_TYPE_NR -> "5G"
+                else -> null
+            }
+            if (label != null) {
+                networkTypeView.text = label
+                return
+            }
+        }
+
+        networkTypeView.text = when {
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> ""
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true ->
+                getString(R.string.network_cellular)
+            else -> getString(R.string.network_unknown)
+        }
+    }
+
+    override fun onStart() { super.onStart() }
 
     override fun onResume() {
         super.onResume()
         mapView.onResume()
+        val batteryFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        registerReceiver(batteryReceiver, batteryFilter)
+        batteryReceiverRegistered = true
+        startSignalMonitoring()
         startLocationUpdates()
         hookMedia()
         MediaListener.onMessageNotificationsChanged = {
@@ -222,24 +635,29 @@ class MainActivity : Activity(), OnMapReadyCallback {
     override fun onPause() {
         MediaListener.onMessageNotificationsChanged = null
         stopLocationUpdates()
+        if (batteryReceiverRegistered) {
+            unregisterReceiver(batteryReceiver)
+            batteryReceiverRegistered = false
+        }
+        stopSignalMonitoring()
         unhookMedia()
         mapView.onPause()
         super.onPause()
     }
 
-    override fun onStop() { mapView.onStop(); super.onStop() }
+    override fun onStop() { super.onStop() }
     override fun onDestroy() {
+        clearTripEndedStatusTimeout()
         artworkExecutor.shutdownNow()
-        mapView.onDestroy()
+        placeSearchExecutor.shutdownNow()
+        routeRequestId++
+        routeRequestTask?.cancel(true)
+        routeExecutor.shutdownNow()
+        mapView.removeJavascriptInterface("PetalDrive")
+        mapView.destroy()
         super.onDestroy()
     }
-    override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        val b = outState.getBundle(MAP_KEY) ?: Bundle().also { outState.putBundle(MAP_KEY, it) }
-        mapView.onSaveInstanceState(b)
-    }
+    override fun onLowMemory() { super.onLowMemory() }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
@@ -259,11 +677,14 @@ class MainActivity : Activity(), OnMapReadyCallback {
     /** Touching the map by hand turns off follow-mode (but tapping the overlay buttons doesn't). */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         if (utilityPage == null && musicPage == null &&
-            ev.actionMasked == MotionEvent.ACTION_DOWN && dashboard.visibility == View.VISIBLE
+            ev.actionMasked == MotionEvent.ACTION_DOWN &&
+            dashboard.visibility == View.VISIBLE
         ) {
             val x = ev.rawX.toInt()
             val y = ev.rawY.toInt()
-            if (hit(mapView, x, y) && !hit(zoomCol, x, y) && !hit(destBar, x, y)) following = false
+            if (hit(mapView, x, y) && !hit(zoomCol, x, y) && !hit(destBar, x, y)) {
+                following = false
+            }
         }
         return super.dispatchTouchEvent(ev)
     }
@@ -283,65 +704,497 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     // ------------------------------------------------------------------ map
 
-    override fun onMapReady(hMap: HuaweiMap) {
-        map = hMap
-        try {
-            if (BuildConfig.PETAL_STYLE_ID.isNotBlank()) hMap.setStyleId(BuildConfig.PETAL_STYLE_ID)
-            else hMap.setMapStyle(MapStyleOptions.loadRawResourceStyle(this, R.raw.mapstyle_night))
-        } catch (e: Exception) {
-            // Styling is cosmetic; fall back to the default map.
-        }
-        hMap.uiSettings.apply {
-            isZoomControlsEnabled = false
-            isMyLocationButtonEnabled = false
-            isCompassEnabled = false
-        }
-        hMap.setOnMapLongClickListener { setDestination(it) }
-        if (locationGranted) hMap.isMyLocationEnabled = true
-        lastFix?.let { center(it, 16f, animate = false) }
+    private fun center(loc: Location, zoom: Float? = null) {
+        runMapScript(
+            "window.petalDriveMap.setUserLocation(" +
+                "${loc.latitude},${loc.longitude},true,${zoom ?: "null"})"
+        )
     }
 
-    private fun center(loc: Location, zoom: Float? = null, animate: Boolean = true) {
-        val m = map ?: return
-        val ll = LatLng(loc.latitude, loc.longitude)
-        val update = if (zoom != null) CameraUpdateFactory.newLatLngZoom(ll, zoom) else CameraUpdateFactory.newLatLng(ll)
-        if (animate) m.animateCamera(update) else m.moveCamera(update)
+    private fun updateUserLocation(loc: Location) {
+        runMapScript(
+            "window.petalDriveMap.setUserLocation(${loc.latitude},${loc.longitude},false,null)"
+        )
     }
 
-    private fun setDestination(p: LatLng) {
-        destMarker?.remove()
-        destination = p
-        destMarker = map?.addMarker(MarkerOptions().position(p).title(getString(R.string.dropped_pin)))
+    private fun setDestination(
+        latitude: Double,
+        longitude: Double,
+        name: String = getString(R.string.pinned_point)
+    ) {
+        clearTripEndedStatusTimeout()
+        val dest = Location("map").apply {
+            this.latitude = latitude
+            this.longitude = longitude
+        }
+        destination = dest
+        destinationName = name
+        routeGeometry = null
+        routePoints = emptyList()
+        routeSummary = null
+        navigationActive = false
+        navigationStartPending = false
+        rerouteInProgress = false
+        routeEndpointSelection = null
         following = false
+        runMapScript("window.petalDriveMap.setDestination($latitude,$longitude)")
+        updateDestBar()
+        routeOriginForNavigation()?.let { requestDrivingRoute(it, dest) }
+    }
+
+    private fun setRouteOrigin(latitude: Double, longitude: Double, name: String = getString(R.string.pinned_point)) {
+        clearTripEndedStatusTimeout()
+        val origin = Location("map").apply {
+            this.latitude = latitude
+            this.longitude = longitude
+        }
+        routeOrigin = origin
+        routeOriginName = name
+        routeGeometry = null
+        routePoints = emptyList()
+        routeSummary = null
+        navigationActive = false
+        navigationStartPending = false
+        rerouteInProgress = false
+        routeEndpointSelection = null
+        following = false
+        runMapScript("window.petalDriveMap.setOrigin($latitude,$longitude)")
+        updateDestBar()
+        destination?.let { requestDrivingRoute(origin, it) }
+    }
+
+    private fun clearRouteEndpoints() {
+        clearTripEndedStatusTimeout()
+        routeRequestId++
+        routeRequestTask?.cancel(true)
+        routeRequestTask = null
+        routeOrigin = null
+        routeOriginName = null
+        destination = null
+        destinationName = null
+        routeGeometry = null
+        routePoints = emptyList()
+        routeSummary = null
+        navigationActive = false
+        navigationStartPending = false
+        rerouteInProgress = false
+        routeEndpointSelection = null
+        routeToView.clearFocus()
+        routeToView.text.clear()
+        runMapScript("window.petalDriveMap.clearOrigin()")
+        runMapScript("window.petalDriveMap.clearDestination()")
         updateDestBar()
     }
 
-    private fun clearDestination() {
-        destMarker?.remove()
-        destMarker = null
-        destination = null
+    private fun routeOriginForNavigation() = routeOrigin ?: lastFix
+
+    private fun selectRouteEndpoint(endpoint: RouteEndpoint) {
+        routeEndpointSelection = endpoint
         updateDestBar()
+    }
+
+    private fun searchPlaces(query: String, endpoint: RouteEndpoint) {
+        Toast.makeText(this, R.string.place_searching, Toast.LENGTH_SHORT).show()
+        placeSearchExecutor.execute {
+            try {
+                val results = fetchPlaces(query)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (results.isEmpty()) {
+                        Toast.makeText(this, R.string.place_no_results, Toast.LENGTH_LONG).show()
+                        return@runOnUiThread
+                    }
+                    val labels = results.map { it.name }.toTypedArray()
+                    AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                        .setTitle(R.string.search_place_title)
+                        .setItems(labels) { _, index ->
+                            val place = results[index]
+                            routeToView.clearFocus()
+                            when (endpoint) {
+                                RouteEndpoint.FROM ->
+                                    setRouteOrigin(place.latitude, place.longitude, place.name)
+                                RouteEndpoint.TO ->
+                                    setDestination(place.latitude, place.longitude, place.name)
+                            }
+                            runMapScript(
+                                "window.petalDriveMap.focusLocation(${place.latitude},${place.longitude},13)"
+                            )
+                        }
+                        .setNegativeButton(R.string.cancel, null)
+                        .show()
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "Nominatim place search failed", e)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    val message = if (e.message?.contains("429") == true) {
+                        R.string.place_search_rate_limited
+                    } else {
+                        R.string.place_search_failed
+                    }
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                }
+            } catch (e: JSONException) {
+                Log.w(TAG, "Could not read Nominatim search results", e)
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        Toast.makeText(this, R.string.place_search_failed, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun fetchPlaces(query: String): List<PlaceResult> {
+        val elapsed = android.os.SystemClock.elapsedRealtime() - lastPlaceSearchAt
+        if (elapsed < NOMINATIM_MIN_INTERVAL_MS) {
+            try {
+                Thread.sleep(NOMINATIM_MIN_INTERVAL_MS - elapsed)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("Place search was interrupted", e)
+            }
+        }
+        lastPlaceSearchAt = android.os.SystemClock.elapsedRealtime()
+
+        val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
+        val connection = URL(
+            "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=$encodedQuery"
+        ).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 12_000
+            connection.readTimeout = 18_000
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty(
+                "User-Agent",
+                "PetalDrive/0.1 (com.eun0115.petaldrive)"
+            )
+            val statusCode = connection.responseCode
+            if (statusCode !in 200..299) {
+                throw IOException("Nominatim returned HTTP $statusCode")
+            }
+
+            val response = connection.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONArray(response)
+            return (0 until json.length()).mapNotNull { index ->
+                val result = json.getJSONObject(index)
+                val latitude = result.getString("lat").toDoubleOrNull()
+                val longitude = result.getString("lon").toDoubleOrNull()
+                val name = result.optString("display_name").trim()
+                if (latitude == null || longitude == null || name.isEmpty() ||
+                    latitude !in -90.0..90.0 || longitude !in -180.0..180.0
+                ) {
+                    null
+                } else {
+                    PlaceResult(name, latitude, longitude)
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun swapRouteEndpoints() {
+        val currentDestination = destination
+        val currentOrigin = routeOriginForNavigation()
+        if (currentDestination == null || currentOrigin == null) {
+            Toast.makeText(this, R.string.route_need_points, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        routeOrigin = currentDestination
+        val currentOriginName = routeOriginName ?: getString(R.string.current_location)
+        routeOriginName = destinationName ?: getString(R.string.pinned_point)
+        destination = currentOrigin
+        destinationName = currentOriginName
+        routeGeometry = null
+        routePoints = emptyList()
+        routeSummary = null
+        navigationActive = false
+        navigationStartPending = false
+        rerouteInProgress = false
+        routeEndpointSelection = null
+        runMapScript("window.petalDriveMap.setOrigin(${currentDestination.latitude},${currentDestination.longitude})")
+        runMapScript("window.petalDriveMap.setDestination(${currentOrigin.latitude},${currentOrigin.longitude})")
+        requestDrivingRoute(currentDestination, currentOrigin)
+        updateDestBar()
+    }
+
+    private fun startRouteOnMap() {
+        val origin = routeOriginForNavigation() ?: return
+        val dest = destination ?: return
+        if (routeGeometry == null) {
+            navigationStartPending = true
+            navigationActive = false
+            if (routeSummary != getString(R.string.finding_route)) {
+                requestDrivingRoute(origin, dest)
+            }
+            updateDestBar()
+            focusRoute(origin)
+            return
+        }
+
+        navigationStartPending = false
+        navigationActive = true
+        following = true
+        updateDestBar()
+        focusRoute(origin)
+    }
+
+    private fun focusRoute(origin: Location) {
+        val focus = lastFix ?: origin
+        mapView.postDelayed({
+            runMapScript(
+                "window.petalDriveMap.focusLocation(" +
+                    "${focus.latitude},${focus.longitude},17)"
+            )
+        }, 250L)
+    }
+
+    private fun stopBuiltInNavigation() {
+        clearTripEndedStatusTimeout()
+        routeRequestId++
+        routeRequestTask?.cancel(true)
+        routeRequestTask = null
+        navigationActive = false
+        navigationStartPending = false
+        rerouteInProgress = false
+        following = false
+        offRouteFixCount = 0
+        routeGeometry = null
+        routePoints = emptyList()
+        routeSummary = getString(R.string.trip_ended)
+        runMapScript("window.petalDriveMap.clearRoute()")
+        updateDestBar()
+        val clearStatus = Runnable {
+            tripEndedStatusClear = null
+            if (!isFinishing && !isDestroyed &&
+                !navigationActive &&
+                routeSummary == getString(R.string.trip_ended)
+            ) {
+                routeSummary = getString(R.string.route_ready)
+                updateDestBar()
+            }
+        }
+        tripEndedStatusClear = clearStatus
+        tripEndedHandler.postDelayed(clearStatus, TRIP_ENDED_STATUS_DURATION_MS)
+    }
+
+    private fun clearTripEndedStatusTimeout() {
+        tripEndedStatusClear?.let(tripEndedHandler::removeCallbacks)
+        tripEndedStatusClear = null
+    }
+
+    private fun checkForOffRoute(location: Location) {
+        if (!navigationActive || navigationStartPending || routePoints.size < 2) return
+        if (!location.hasAccuracy() || location.accuracy > MAX_REROUTE_ACCURACY_METERS) {
+            offRouteFixCount = 0
+            return
+        }
+
+        if (distanceToRouteMeters(location) <= OFF_ROUTE_THRESHOLD_METERS) {
+            offRouteFixCount = 0
+            return
+        }
+
+        offRouteFixCount++
+        if (offRouteFixCount < OFF_ROUTE_FIXES_REQUIRED ||
+            rerouteInProgress || routeRequestTask?.isDone == false
+        ) return
+
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastRerouteAt < REROUTE_COOLDOWN_MS) return
+        val dest = destination ?: return
+        lastRerouteAt = now
+        offRouteFixCount = 0
+        rerouteInProgress = true
+        requestDrivingRoute(location, dest, isReroute = true)
+    }
+
+    private fun distanceToRouteMeters(location: Location): Double {
+        val latitudeScale = Math.toRadians(1.0) * EARTH_RADIUS_METERS
+        val longitudeScale = latitudeScale * kotlin.math.cos(Math.toRadians(location.latitude))
+        var shortestDistance = Double.POSITIVE_INFINITY
+        var previous = routePoints.first()
+
+        for (index in 1 until routePoints.size) {
+            val current = routePoints[index]
+            val startX = (previous.longitude - location.longitude) * longitudeScale
+            val startY = (previous.latitude - location.latitude) * latitudeScale
+            val endX = (current.longitude - location.longitude) * longitudeScale
+            val endY = (current.latitude - location.latitude) * latitudeScale
+            val deltaX = endX - startX
+            val deltaY = endY - startY
+            val segmentLengthSquared = deltaX * deltaX + deltaY * deltaY
+            val projection = if (segmentLengthSquared == 0.0) {
+                0.0
+            } else {
+                (-(startX * deltaX + startY * deltaY) / segmentLengthSquared).coerceIn(0.0, 1.0)
+            }
+            val closestX = startX + projection * deltaX
+            val closestY = startY + projection * deltaY
+            shortestDistance = minOf(shortestDistance, hypot(closestX, closestY))
+            previous = current
+        }
+        return shortestDistance
+    }
+
+    private fun requestDrivingRoute(origin: Location, dest: Location, isReroute: Boolean = false) {
+        clearTripEndedStatusTimeout()
+        val requestId = ++routeRequestId
+        routeRequestTask?.cancel(true)
+        val previousSummary = routeSummary
+        routeSummary = getString(if (isReroute) R.string.rerouting else R.string.finding_route)
+        updateDestBar()
+        routeRequestTask = routeExecutor.submit {
+            try {
+                val route = fetchDrivingRoute(origin, dest)
+                runOnUiThread {
+                    if (requestId != routeRequestId || destination !== dest) return@runOnUiThread
+                    if (isReroute) rerouteInProgress = false
+                    routeGeometry = route.geometry
+                    routePoints = route.points
+                    offRouteFixCount = 0
+                    routeSummary = route.summary
+                    runMapScript("window.petalDriveMap.setRoute(${route.geometry},${!isReroute})")
+                    if (navigationStartPending) {
+                        navigationStartPending = false
+                        navigationActive = true
+                        following = true
+                        focusRoute(origin)
+                    }
+                    updateDestBar()
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "OSRM route request failed", e)
+                showRouteError(requestId, dest, isReroute, previousSummary)
+            } catch (e: JSONException) {
+                Log.w(TAG, "Could not read OSRM route response", e)
+                showRouteError(requestId, dest, isReroute, previousSummary)
+            }
+        }
+    }
+
+    private fun fetchDrivingRoute(origin: Location, dest: Location): DrivingRoute {
+        val url = String.format(
+            Locale.US,
+            "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson&steps=false",
+            origin.longitude,
+            origin.latitude,
+            dest.longitude,
+            dest.latitude
+        )
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 12_000
+            connection.readTimeout = 18_000
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("User-Agent", "PetalDrive/1.0 (Android)")
+            val statusCode = connection.responseCode
+            if (statusCode !in 200..299) throw IOException("OSRM returned HTTP $statusCode")
+
+            val response = connection.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(response)
+            if (json.optString("code") != "Ok") {
+                throw IOException("OSRM did not find a drivable route")
+            }
+            val route = json.getJSONArray("routes").getJSONObject(0)
+            val distance = route.getDouble("distance")
+            val minutes = (route.getDouble("duration") / 60.0).roundToInt()
+            val durationText = if (minutes < 60) {
+                "$minutes min"
+            } else {
+                "${minutes / 60} hr ${minutes % 60} min"
+            }
+            val distanceKm = String.format(Locale.getDefault(), "%.1f", distance / 1000.0)
+            val summary = getString(R.string.route_estimate, durationText, distanceKm)
+            val coordinates = route.getJSONObject("geometry").getJSONArray("coordinates")
+            val points = buildList(coordinates.length()) {
+                for (index in 0 until coordinates.length()) {
+                    val coordinate = coordinates.getJSONArray(index)
+                    add(RoutePoint(coordinate.getDouble(1), coordinate.getDouble(0)))
+                }
+            }
+            if (points.size < 2) throw IOException("OSRM route geometry is incomplete")
+            return DrivingRoute(coordinates.toString(), summary, points)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun showRouteError(
+        requestId: Int,
+        dest: Location,
+        isReroute: Boolean,
+        previousSummary: String?
+    ) {
+        runOnUiThread {
+            if (requestId != routeRequestId || destination !== dest) return@runOnUiThread
+            if (isReroute) rerouteInProgress = false
+            if (isReroute) {
+                routeSummary = previousSummary ?: getString(R.string.route_unavailable)
+            } else {
+                routeGeometry = null
+                routePoints = emptyList()
+                routeSummary = getString(R.string.route_unavailable)
+                navigationStartPending = false
+                navigationActive = false
+                runMapScript("window.petalDriveMap.clearRoute()")
+            }
+            updateDestBar()
+            Toast.makeText(this, R.string.route_request_failed, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun updateDestBar() {
-        val d = destination
-        if (d == null) {
-            destBar.visibility = View.GONE
-            return
-        }
         destBar.visibility = View.VISIBLE
-        val fix = lastFix
-        destSub.text = if (fix == null) {
-            getString(R.string.waiting_gps)
-        } else {
-            val out = FloatArray(1)
-            Location.distanceBetween(fix.latitude, fix.longitude, d.latitude, d.longitude, out)
-            "${fmtDist(out[0])} · ${getString(R.string.straight_line)}"
+        if (!routeToView.hasFocus()) {
+            routeToView.setText(
+                when {
+                    routeEndpointSelection == RouteEndpoint.TO -> ""
+                    else -> destinationName.orEmpty()
+                }
+            )
         }
-    }
+        routeToView.contentDescription = getString(R.string.search_to)
 
-    private fun fmtDist(m: Float) =
-        if (m < 1000f) "${m.roundToInt()} m" else String.format(Locale.getDefault(), "%.1f km", m / 1000f)
+        val goButton = v<View>(R.id.destGo)
+        goButton.isEnabled = !navigationActive
+        goButton.alpha = if (goButton.isEnabled) 1f else 0.55f
+        (goButton as? TextView)?.setText(
+            when {
+                navigationStartPending -> R.string.starting_route
+                else -> R.string.go
+            }
+        )
+        goButton.visibility = if (navigationActive) View.GONE else View.VISIBLE
+        v<View>(R.id.destEnd).visibility = if (navigationActive) View.VISIBLE else View.GONE
+        v<View>(R.id.destClear).visibility =
+            if (destination != null && !navigationActive) View.VISIBLE else View.GONE
+
+        destBar.visibility = View.VISIBLE
+        destSub.text = when {
+            routeEndpointSelection == RouteEndpoint.FROM -> getString(R.string.pick_from_map)
+            routeEndpointSelection == RouteEndpoint.TO -> getString(R.string.pick_to_map)
+            navigationStartPending && routeSummary == getString(R.string.finding_route) ->
+                getString(R.string.finding_route)
+            routeSummary != null && routeGeometry != null -> routeSummary
+            routeSummary == getString(R.string.finding_route) -> getString(R.string.finding_route)
+            routeSummary != null -> routeSummary
+            destination == null -> getString(R.string.route_choose_destination)
+            routeOriginForNavigation() == null -> getString(R.string.waiting_gps)
+            else -> getString(R.string.finding_route)
+        }
+        val hasRouteEstimate = routeGeometry != null && routeSummary != null
+        destSub.setTextColor(
+            getColor(if (hasRouteEstimate) R.color.text_primary else R.color.text_secondary)
+        )
+        destSub.textSize = if (hasRouteEstimate) 14f else 12f
+        destSub.setTypeface(
+            null,
+            if (hasRouteEstimate) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+        )
+    }
 
     // ------------------------------------------------------------------ location
 
@@ -380,12 +1233,18 @@ class MainActivity : Activity(), OnMapReadyCallback {
                     Toast.makeText(this, "Phone permission was not granted.", Toast.LENGTH_SHORT).show()
                 }
             }
+            REQ_PHONE_STATE -> {
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                    startSignalMonitoring()
+                } else {
+                    updateNetworkTypeLabel()
+                }
+            }
         }
     }
 
     private fun onLocationGranted() {
         locationGranted = true
-        map?.isMyLocationEnabled = true
         startLocationUpdates()
     }
 
@@ -412,25 +1271,16 @@ class MainActivity : Activity(), OnMapReadyCallback {
         if (firstFix) {
             firstFix = false
             center(loc, 16f)
-        } else if (following) {
-            center(loc)
+        } else {
+            updateUserLocation(loc)
+            if (following) center(loc)
         }
+        val dest = destination
+        if (dest != null && routeSummary == null) {
+            routeOriginForNavigation()?.let { requestDrivingRoute(it, dest) }
+        }
+        checkForOffRoute(loc)
         updateDestBar()
-    }
-
-    // ------------------------------------------------------------------ Petal Maps hand-off
-
-    /** Opens turn-by-turn in the Petal Maps app (falls back to petalmaps.com if the app isn't there). */
-    private fun startNavigation(dest: LatLng) {
-        val from = lastFix?.let { "saddr=${it.latitude},${it.longitude}&" } ?: ""
-        val to = "daddr=${dest.latitude},${dest.longitude}"
-        val app = Uri.parse("mapapp://navigation?$from$to&language=${Locale.getDefault().language}&type=drive")
-        val web = Uri.parse("https://www.petalmaps.com/navigation/?$from$to&type=drive&utm_source=$packageName")
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, app))
-        } catch (e: ActivityNotFoundException) {
-            openIntent(Intent(Intent.ACTION_VIEW, web))
-        }
     }
 
     private fun showSearch() {
@@ -534,7 +1384,10 @@ class MainActivity : Activity(), OnMapReadyCallback {
             Tile(R.string.maps, R.drawable.ic_navigation, 0xFF0A84FF.toInt()) { showDashboard() },
             Tile(R.string.music, R.drawable.ic_music, 0xFFFF375F.toInt()) { openMusicApp() },
             Tile(R.string.phone, R.drawable.ic_phone, 0xFF30D158.toInt()) { openPhonePage() },
-            Tile(R.string.messages, R.drawable.ic_message, 0xFF30D158.toInt()) { openMessagesPage() }
+            Tile(R.string.messages, R.drawable.ic_message, 0xFF30D158.toInt()) { openMessagesPage() },
+            Tile(R.string.settings, R.drawable.ic_settings, 0xFF8E8E93.toInt()) {
+                openIntent(Intent(Settings.ACTION_SETTINGS))
+            }
         )
         tiles.forEach { grid.addView(makeTile(it)) }
     }
@@ -1607,9 +2460,16 @@ private fun togglePlayback() {
 
     companion object {
         private const val TAG = "PetalDrive"
-        private const val MAP_KEY = "MapViewBundleKey"
+        private const val NOMINATIM_MIN_INTERVAL_MS = 1_000L
+        private const val OFF_ROUTE_THRESHOLD_METERS = 65.0
+        private const val MAX_REROUTE_ACCURACY_METERS = 40f
+        private const val OFF_ROUTE_FIXES_REQUIRED = 2
+        private const val REROUTE_COOLDOWN_MS = 15_000L
+        private const val TRIP_ENDED_STATUS_DURATION_MS = 5_000L
+        private const val EARTH_RADIUS_METERS = 6_371_000.0
         private const val REQ_LOCATION = 1001
         private const val REQ_CALL_LOG = 1002
         private const val REQ_CALL_PHONE = 1003
+        private const val REQ_PHONE_STATE = 1004
     }
 }

@@ -1,5 +1,0 @@
-# Copy to local.properties (Android Studio creates that file and adds sdk.dir for you)
-# api_key value from agconnect-services.json (AppGallery Connect > Project settings)
-PETAL_API_KEY=
-# Optional: a published Petal Maps Studio style ID for a full night theme
-PETAL_STYLE_ID=

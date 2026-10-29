@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://tile.openstreetmap.org data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:">
+    <title>Petal Drive Map</title>
+    <link rel="stylesheet" href="leaflet.css">
+    <style>
+        html, body, #map {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: #17191c;
+        }
+
+        .leaflet-container {
+            font: 12px/1.5 sans-serif;
+        }
+
+        .leaflet-control-attribution {
+            padding: 2px 6px !important;
+            border-radius: 5px 0 0 0;
+            color: #242424;
+        }
+
+        .petal-marker {
+            width: 20px;
+            height: 20px;
+            border: 3px solid #fff;
+            border-radius: 50%;
+            box-shadow: 0 2px 8px #0008;
+            box-sizing: border-box;
+        }
+
+        .petal-marker-user {
+            background: #1687ff;
+        }
+
+        .petal-marker-destination {
+            width: 18px;
+            height: 18px;
+            background: #ff6b5f;
+        }
+
+        .petal-marker-origin {
+            width: 18px;
+            height: 18px;
+            background: #31c48d;
+        }
+    </style>
+</head>
+<body>
+<div id="map" role="application" aria-label="OpenStreetMap"></div>
+<script src="leaflet.js"></script>
+<script>
+    (() => {
+        const map = L.map("map", {
+            zoomControl: false,
+            preferCanvas: true
+        }).setView([0, 0], 2);
+
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        const userIcon = L.divIcon({
+            className: "",
+            html: '<div class="petal-marker petal-marker-user"></div>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        });
+        const destinationIcon = L.divIcon({
+            className: "",
+            html: '<div class="petal-marker petal-marker-destination"></div>',
+            iconSize: [18, 18],
+            iconAnchor: [9, 9]
+        });
+        const originIcon = L.divIcon({
+            className: "",
+            html: '<div class="petal-marker petal-marker-origin"></div>',
+            iconSize: [18, 18],
+            iconAnchor: [9, 9]
+        });
+
+        let userMarker = null;
+        let originMarker = null;
+        let destinationMarker = null;
+        let routeLine = null;
+
+        window.petalDriveMap = {
+            invalidateSize() {
+                map.invalidateSize();
+            },
+            focusLocation(latitude, longitude, zoom) {
+                map.setView([latitude, longitude], zoom);
+            },
+            zoomBy(amount) {
+                map.setZoom(map.getZoom() + amount);
+            },
+            setUserLocation(latitude, longitude, center, zoom) {
+                const location = [latitude, longitude];
+                if (userMarker) {
+                    userMarker.setLatLng(location);
+                } else {
+                    userMarker = L.marker(location, {
+                        icon: userIcon,
+                        title: "Your location",
+                        keyboard: false
+                    }).addTo(map);
+                }
+                if (center) {
+                    if (zoom === null) {
+                        map.panTo(location);
+                    } else {
+                        map.setView(location, zoom);
+                    }
+                }
+            },
+            setDestination(latitude, longitude) {
+                const location = [latitude, longitude];
+                if (destinationMarker) {
+                    destinationMarker.setLatLng(location);
+                } else {
+                    destinationMarker = L.marker(location, {
+                        icon: destinationIcon,
+                        title: "Destination",
+                        keyboard: false
+                    }).addTo(map);
+                }
+                this.clearRoute();
+            },
+            setOrigin(latitude, longitude) {
+                const location = [latitude, longitude];
+                if (originMarker) {
+                    originMarker.setLatLng(location);
+                } else {
+                    originMarker = L.marker(location, {
+                        icon: originIcon,
+                        title: "Route start",
+                        keyboard: false
+                    }).addTo(map);
+                }
+                this.clearRoute();
+            },
+            clearOrigin() {
+                if (originMarker) {
+                    map.removeLayer(originMarker);
+                    originMarker = null;
+                }
+                this.clearRoute();
+            },
+            clearDestination() {
+                if (destinationMarker) {
+                    map.removeLayer(destinationMarker);
+                    destinationMarker = null;
+                }
+                this.clearRoute();
+            },
+            setRoute(coordinates, fitRoute = true) {
+                this.clearRoute();
+                if (!Array.isArray(coordinates) || coordinates.length < 2) {
+                    return;
+                }
+                const points = coordinates.map(([longitude, latitude]) => [latitude, longitude]);
+                routeLine = L.polyline(points, {
+                    color: "#1687ff",
+                    weight: 6,
+                    opacity: 0.9,
+                    lineCap: "round",
+                    lineJoin: "round"
+                }).addTo(map);
+                if (fitRoute) {
+                    map.fitBounds(routeLine.getBounds(), {
+                        padding: [30, 30],
+                        maxZoom: 15
+                    });
+                }
+            },
+            clearRoute() {
+                if (routeLine) {
+                    map.removeLayer(routeLine);
+                    routeLine = null;
+                }
+            }
+        };
+
+        let pressTimer = null;
+        let pressOrigin = null;
+        const container = map.getContainer();
+        container.addEventListener("pointerdown", event => {
+            if (event.button !== 0 && event.pointerType === "mouse") {
+                return;
+            }
+            pressOrigin = {x: event.clientX, y: event.clientY};
+            clearTimeout(pressTimer);
+            pressTimer = setTimeout(() => {
+                if (!pressOrigin) {
+                    return;
+                }
+                const bounds = container.getBoundingClientRect();
+                const point = map.containerPointToLatLng([
+                    pressOrigin.x - bounds.left,
+                    pressOrigin.y - bounds.top
+                ]);
+                if (window.PetalDrive) {
+                    window.PetalDrive.onMapPointSelected(point.lat, point.lng);
+                }
+                pressOrigin = null;
+            }, 600);
+        });
+        container.addEventListener("pointermove", event => {
+            if (pressOrigin &&
+                Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) > 12) {
+                clearTimeout(pressTimer);
+                pressOrigin = null;
+            }
+        });
+        ["pointerup", "pointercancel", "pointerleave"].forEach(name => {
+            container.addEventListener(name, () => {
+                clearTimeout(pressTimer);
+                pressOrigin = null;
+            });
+        });
+
+        map.on("tileerror", () => {
+            if (window.PetalDrive) {
+                window.PetalDrive.onTileError();
+            }
+        });
+        if (window.PetalDrive) {
+            window.PetalDrive.onMapReady();
+        }
+    })();
+</script>
+</body>
+</html>
