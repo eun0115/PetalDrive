@@ -532,7 +532,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
         val grid = v<GridLayout>(R.id.appGrid)
         val tiles = listOf(
             Tile(R.string.maps, R.drawable.ic_navigation, 0xFF0A84FF.toInt()) { showDashboard() },
-            Tile(R.string.music, R.drawable.ic_music, 0xFFFF375F.toInt()) { openCategory(Intent.CATEGORY_APP_MUSIC) },
+            Tile(R.string.music, R.drawable.ic_music, 0xFFFF375F.toInt()) { openMusicApp() },
             Tile(R.string.phone, R.drawable.ic_phone, 0xFF30D158.toInt()) { openPhonePage() },
             Tile(R.string.messages, R.drawable.ic_message, 0xFF30D158.toInt()) { openMessagesPage() }
         )
@@ -1101,8 +1101,60 @@ class MainActivity : Activity(), OnMapReadyCallback {
         setColor(0xFF1C1C1E.toInt())
     }
 
-    private fun openCategory(category: String) {
-        openIntent(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, category))
+    private fun openMusicApp() {
+        val categoryIntent = Intent.makeMainSelectorActivity(
+            Intent.ACTION_MAIN,
+            Intent.CATEGORY_APP_MUSIC
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            startActivity(categoryIntent)
+            return
+        } catch (_: ActivityNotFoundException) {
+            // Some music players don't register Android's music-app category.
+        }
+
+        val musicKeywords = listOf(
+            "music", "spotify", "apple", "youtube music", "vlc", "poweramp",
+            "tidal", "deezer", "amazon", "foobar", "aimp", "musicolet", "jetaudio"
+        )
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val candidates = packageManager.queryIntentActivities(launcherIntent, 0)
+            .mapNotNull { resolveInfo ->
+                val activityInfo = resolveInfo.activityInfo ?: return@mapNotNull null
+                val label = resolveInfo.loadLabel(packageManager).toString()
+                val searchableName = "${activityInfo.packageName} $label".lowercase(Locale.ROOT)
+                if (musicKeywords.none(searchableName::contains)) return@mapNotNull null
+                activityInfo to label
+            }
+            .distinctBy { it.first.packageName }
+            .sortedBy { it.second.lowercase(Locale.ROOT) }
+
+        when (candidates.size) {
+            0 -> Toast.makeText(this, "No music player app was found.", Toast.LENGTH_LONG).show()
+            1 -> launchMusicActivity(candidates.first().first)
+            else -> AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Choose music app")
+                .setItems(candidates.map { it.second }.toTypedArray()) { _, index ->
+                    launchMusicActivity(candidates[index].first)
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun launchMusicActivity(activity: android.content.pm.ActivityInfo) {
+        try {
+            startActivity(
+                Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_LAUNCHER)
+                    .setClassName(activity.packageName, activity.name)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "The selected music app is unavailable.", Toast.LENGTH_LONG).show()
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "The selected music app can't be opened.", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun openIntent(i: Intent) {
