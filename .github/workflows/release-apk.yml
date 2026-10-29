@@ -1,15 +1,17 @@
 name: Build and upload beta APK
 
 on:
+  push:
+    branches: [main]
+  workflow_dispatch:
   release:
     types: [published]
 
-permissions:
-  contents: write
-
 jobs:
-  build-and-upload:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -28,6 +30,26 @@ jobs:
 
       - name: Name release APK
         run: cp app/build/outputs/apk/debug/app-debug.apk PetalDrive-0.1-Beta.apk
+
+      - name: Save beta APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PetalDrive-0.1-Beta
+          path: PetalDrive-0.1-Beta.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  upload-release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download beta APK
+        uses: actions/download-artifact@v4
+        with:
+          name: PetalDrive-0.1-Beta
 
       - name: Upload APK to GitHub release
         env:
