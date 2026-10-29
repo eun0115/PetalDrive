@@ -102,6 +102,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private var musicTitle: TextView? = null
     private var musicArtist: TextView? = null
     private var musicPlay: ImageView? = null
+    private var lastPlayingState: Boolean? = null
 
     private val musicHandler = Handler(Looper.getMainLooper())
     private val artworkExecutor = Executors.newSingleThreadExecutor()
@@ -414,8 +415,72 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     // ------------------------------------------------------------------ app grid
 
-    private fun showDashboard() { gridPage.visibility = View.GONE; dashboard.visibility = View.VISIBLE }
-    private fun showGrid() { dashboard.visibility = View.GONE; gridPage.visibility = View.VISIBLE }
+    private fun showDashboard() = transitionScreens(
+        from = gridPage,
+        to = dashboard,
+        enterFrom = -dp(18).toFloat()
+    )
+
+    private fun showGrid() = transitionScreens(
+        from = dashboard,
+        to = gridPage,
+        enterFrom = dp(18).toFloat()
+    )
+
+    private fun transitionScreens(from: View, to: View, enterFrom: Float) {
+        if (to.visibility == View.VISIBLE) return
+
+        from.animate().cancel()
+        to.animate().cancel()
+        from.visibility = View.VISIBLE
+        from.alpha = 1f
+        from.translationX = 0f
+        to.alpha = 0f
+        to.translationX = enterFrom
+        to.visibility = View.VISIBLE
+        to.animate()
+            .alpha(1f)
+            .translationX(0f)
+            .setDuration(220)
+            .start()
+        from.animate()
+            .alpha(0f)
+            .translationX(-enterFrom / 2f)
+            .setDuration(180)
+            .withEndAction {
+                from.visibility = View.GONE
+                from.alpha = 1f
+                from.translationX = 0f
+            }
+            .start()
+    }
+
+    private fun animateArtwork(view: ImageView, bitmap: android.graphics.Bitmap?) {
+        view.animate().cancel()
+        view.alpha = 0f
+        if (bitmap == null) {
+            view.setPadding(dp(14), dp(14), dp(14), dp(14))
+            view.setImageResource(R.drawable.ic_music)
+        } else {
+            view.setPadding(0, 0, 0, 0)
+            view.setImageBitmap(bitmap)
+        }
+        view.animate().alpha(1f).setDuration(220).start()
+    }
+
+    private fun animatePlaybackChange(view: ImageView, playing: Boolean) {
+        view.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+        if (lastPlayingState != null && lastPlayingState != playing) {
+            view.animate().cancel()
+            view.scaleX = 0.8f
+            view.scaleY = 0.8f
+            view.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(180)
+                .start()
+        }
+    }
 
     private fun buildGrid() {
         val grid = v<GridLayout>(R.id.appGrid)
@@ -534,23 +599,22 @@ private fun renderNowPlaying() {
     showArt(bitmap)
 
     val playing = c?.playbackState?.state == PlaybackState.STATE_PLAYING
-    playBtn.setImageResource(
-        if (playing) R.drawable.ic_pause else R.drawable.ic_play
-    )
+    animatePlaybackChange(playBtn, playing)
 
     // Full-screen player
     musicTitle?.text = title
     musicArtist?.text = artist
-    musicPlay?.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+    musicPlay?.let { animatePlaybackChange(it, playing) }
+    lastPlayingState = playing
 
     if (bitmap != null) {
         requestedArtworkUri = null
-        musicArt?.setImageBitmap(bitmap)
+        musicArt?.let { animateArtwork(it, bitmap) }
     } else {
         loadArtworkUri(artworkUri)
         if (artworkUri.isNullOrBlank()) {
             requestedArtworkUri = null
-            musicArt?.setImageResource(R.drawable.ic_music)
+            musicArt?.let { animateArtwork(it, null) }
         }
     }
 
@@ -564,7 +628,7 @@ private fun renderNowPlaying() {
             Log.w(TAG, "Unsupported album artwork URI scheme: ${uri.scheme}")
             return
         }
-        musicArt?.setImageResource(R.drawable.ic_music)
+        musicArt?.let { animateArtwork(it, null) }
 
         artworkExecutor.execute {
             val bitmap = try {
@@ -591,20 +655,14 @@ private fun renderNowPlaying() {
             musicHandler.post {
                 if (requestedArtworkUri != uriValue) return@post
                 showArt(bitmap)
-                musicArt?.setImageBitmap(bitmap)
+                musicArt?.let { animateArtwork(it, bitmap) }
             }
         }
     }
 
     private fun showArt(bmp: android.graphics.Bitmap?) {
         art.clipToOutline = true
-        if (bmp != null) {
-            art.setPadding(0, 0, 0, 0)
-            art.setImageBitmap(bmp)
-        } else {
-            art.setPadding(dp(14), dp(14), dp(14), dp(14))
-            art.setImageResource(R.drawable.ic_music)
-        }
+        animateArtwork(art, bmp)
     }
 
 private fun buildMusicPage() {
@@ -863,6 +921,13 @@ private fun buildMusicPage() {
     val root = findViewById<FrameLayout>(android.R.id.content)
     root.addView(page, FrameLayout.LayoutParams(-1, -1))
     page.bringToFront()
+    page.alpha = 0f
+    page.translationY = dp(20).toFloat()
+    page.animate()
+        .alpha(1f)
+        .translationY(0f)
+        .setDuration(240)
+        .start()
 
     renderNowPlaying()
 }
@@ -877,13 +942,25 @@ private fun openMusicPage() {
 
 private fun closeMusicPage() {
     val page = musicPage ?: return
-    (page.parent as? ViewGroup)?.removeView(page)
-    musicPage = null
-    musicArt = null
-    musicTitle = null
-    musicArtist = null
-    musicPlay = null
-    hideSystemBars()
+    page.animate().cancel()
+    page.animate()
+        .alpha(0f)
+        .translationY(dp(20).toFloat())
+        .setDuration(180)
+        .withEndAction {
+            (page.parent as? ViewGroup)?.removeView(page)
+            if (musicPage === page) {
+                musicPage = null
+                musicArt = null
+                musicTitle = null
+                musicArtist = null
+                musicPlay = null
+            }
+            page.alpha = 1f
+            page.translationY = 0f
+            hideSystemBars()
+        }
+        .start()
 }
 
 private fun togglePlayback() {
