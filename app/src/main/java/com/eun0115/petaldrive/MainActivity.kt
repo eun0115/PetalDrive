@@ -28,6 +28,7 @@ import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.provider.CallLog
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -37,6 +38,7 @@ import android.widget.EditText
 import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
@@ -53,13 +55,16 @@ import com.huawei.hms.maps.model.Marker
 import com.huawei.hms.maps.model.MarkerOptions
 import java.io.IOException
 import java.net.URL
+import java.text.DateFormat
 import java.util.Locale
+import java.util.Date
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : Activity(), OnMapReadyCallback {
 
     private data class Tile(val label: Int, val icon: Int, val color: Int, val action: () -> Unit)
+    private enum class PhoneTab { DIALER, RECENTS }
 
     // --- views
     private lateinit var mapView: MapView
@@ -103,6 +108,13 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private var musicArtist: TextView? = null
     private var musicPlay: ImageView? = null
     private var lastPlayingState: Boolean? = null
+    private var utilityPage: FrameLayout? = null
+    private var utilityBody: FrameLayout? = null
+    private var utilityScreen: String? = null
+    private var phoneTabContainer: FrameLayout? = null
+    private var phoneTab = PhoneTab.DIALER
+    private var dialInput: EditText? = null
+    private var pendingCallNumber: String? = null
 
     private val musicHandler = Handler(Looper.getMainLooper())
     private val artworkExecutor = Executors.newSingleThreadExecutor()
@@ -163,7 +175,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
         v<View>(R.id.railMaps).setOnClickListener { showDashboard() }
         v<View>(R.id.railMusic).setOnClickListener { openMusicPage() }
         v<View>(R.id.mediaCard).setOnClickListener { openMusicPage() }
-        v<View>(R.id.railPhone).setOnClickListener { openIntent(Intent(Intent.ACTION_DIAL)) }
+        v<View>(R.id.railPhone).setOnClickListener { openPhonePage() }
         v<View>(R.id.railHome).setOnClickListener {
             if (gridPage.visibility == View.VISIBLE) showDashboard() else showGrid()
         }
@@ -199,9 +211,14 @@ class MainActivity : Activity(), OnMapReadyCallback {
         mapView.onResume()
         startLocationUpdates()
         hookMedia()
+        MediaListener.onMessageNotificationsChanged = {
+            if (utilityScreen == "messages") refreshMessagesPage()
+        }
+        if (utilityScreen == "messages") refreshMessagesPage()
     }
 
     override fun onPause() {
+        MediaListener.onMessageNotificationsChanged = null
         stopLocationUpdates()
         unhookMedia()
         mapView.onPause()
@@ -230,6 +247,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
     @Deprecated("Back returns to the previous PetalDrive screen")
     override fun onBackPressed() {
         when {
+            utilityPage != null -> closeUtilityPage()
             musicPage != null -> closeMusicPage()
             gridPage.visibility == View.VISIBLE -> showDashboard()
             else -> super.onBackPressed()
@@ -238,7 +256,9 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     /** Touching the map by hand turns off follow-mode (but tapping the overlay buttons doesn't). */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        if (ev.actionMasked == MotionEvent.ACTION_DOWN && dashboard.visibility == View.VISIBLE) {
+        if (utilityPage == null && musicPage == null &&
+            ev.actionMasked == MotionEvent.ACTION_DOWN && dashboard.visibility == View.VISIBLE
+        ) {
             val x = ev.rawX.toInt()
             val y = ev.rawY.toInt()
             if (hit(mapView, x, y) && !hit(zoomCol, x, y) && !hit(destBar, x, y)) following = false
@@ -338,8 +358,26 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_LOCATION && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
-            onLocationGranted()
+        when (requestCode) {
+            REQ_LOCATION -> if (grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
+                onLocationGranted()
+            }
+            REQ_CALL_LOG -> {
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                    showPhoneTab(PhoneTab.RECENTS)
+                } else {
+                    Toast.makeText(this, "Call history permission was not granted.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            REQ_CALL_PHONE -> {
+                val number = pendingCallNumber
+                pendingCallNumber = null
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && number != null) {
+                    placeCall(number)
+                } else {
+                    Toast.makeText(this, "Phone permission was not granted.", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -493,8 +531,8 @@ class MainActivity : Activity(), OnMapReadyCallback {
         val tiles = listOf(
             Tile(R.string.maps, R.drawable.ic_navigation, 0xFF0A84FF.toInt()) { showDashboard() },
             Tile(R.string.music, R.drawable.ic_music, 0xFFFF375F.toInt()) { openCategory(Intent.CATEGORY_APP_MUSIC) },
-            Tile(R.string.phone, R.drawable.ic_phone, 0xFF30D158.toInt()) { openIntent(Intent(Intent.ACTION_DIAL)) },
-            Tile(R.string.messages, R.drawable.ic_message, 0xFF30D158.toInt()) { openCategory(Intent.CATEGORY_APP_MESSAGING) }
+            Tile(R.string.phone, R.drawable.ic_phone, 0xFF30D158.toInt()) { openPhonePage() },
+            Tile(R.string.messages, R.drawable.ic_message, 0xFF30D158.toInt()) { openMessagesPage() }
         )
         tiles.forEach { grid.addView(makeTile(it)) }
     }
@@ -529,6 +567,442 @@ class MainActivity : Activity(), OnMapReadyCallback {
             addView(label)
             setOnClickListener { t.action() }
         }
+    }
+
+    private fun createUtilityPage(title: String, screen: String): FrameLayout {
+        utilityPage?.let {
+            it.animate().cancel()
+            (it.parent as? ViewGroup)?.removeView(it)
+        }
+        val page = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(12, 12, 15))
+            isFocusableInTouchMode = true
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(16))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val back = ImageView(this).apply {
+            setImageResource(R.drawable.ic_back)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            contentDescription = getString(R.string.cancel)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { closeUtilityPage() }
+        }
+        header.addView(back, LinearLayout.LayoutParams(dp(48), dp(48)))
+        val heading = TextView(this).apply {
+            text = title
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        header.addView(heading, LinearLayout.LayoutParams(0, dp(48), 1f))
+        content.addView(header, LinearLayout.LayoutParams(-1, dp(52)))
+
+        val body = FrameLayout(this)
+        content.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        page.addView(content, FrameLayout.LayoutParams(-1, -1))
+
+        val root = findViewById<FrameLayout>(android.R.id.content)
+        root.addView(page, FrameLayout.LayoutParams(-1, -1))
+        page.bringToFront()
+        page.alpha = 0f
+        page.translationY = dp(16).toFloat()
+        page.animate().alpha(1f).translationY(0f).setDuration(200).start()
+
+        utilityPage = page
+        utilityBody = body
+        utilityScreen = screen
+        return body
+    }
+
+    private fun closeUtilityPage() {
+        val page = utilityPage ?: return
+        page.animate().cancel()
+        page.animate()
+            .alpha(0f)
+            .translationY(dp(16).toFloat())
+            .setDuration(160)
+            .withEndAction {
+                (page.parent as? ViewGroup)?.removeView(page)
+                if (utilityPage === page) {
+                    utilityPage = null
+                    utilityBody = null
+                    utilityScreen = null
+                    phoneTabContainer = null
+                    dialInput = null
+                }
+                page.alpha = 1f
+                page.translationY = 0f
+                hideSystemBars()
+            }
+            .start()
+    }
+
+    private fun openPhonePage() {
+        phoneTab = PhoneTab.DIALER
+        val body = createUtilityPage("Phone", "phone")
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val tabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val dialerTab = utilityTab("Dialer")
+        val recentsTab = utilityTab("Recents")
+        tabs.addView(dialerTab, LinearLayout.LayoutParams(0, dp(52), 1f))
+        tabs.addView(recentsTab, LinearLayout.LayoutParams(0, dp(52), 1f))
+        content.addView(tabs, LinearLayout.LayoutParams(-1, dp(52)))
+
+        val tabContainer = FrameLayout(this)
+        content.addView(tabContainer, LinearLayout.LayoutParams(-1, 0, 1f))
+        body.addView(content, FrameLayout.LayoutParams(-1, -1))
+        phoneTabContainer = tabContainer
+        dialerTab.setOnClickListener { showPhoneTab(PhoneTab.DIALER) }
+        recentsTab.setOnClickListener { showPhoneTab(PhoneTab.RECENTS) }
+        showPhoneTab(phoneTab)
+    }
+
+    private fun utilityTab(label: String) = TextView(this).apply {
+        text = label
+        textSize = 16f
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        isClickable = true
+        isFocusable = true
+    }
+
+    private fun showPhoneTab(tab: PhoneTab) {
+        phoneTab = tab
+        val container = phoneTabContainer ?: return
+        container.removeAllViews()
+        if (tab == PhoneTab.DIALER) {
+            showDialer(container)
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
+            val permissionView = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+            }
+            permissionView.addView(utilityText("Allow access to show recent calls.", 18f))
+            val allow = utilityButton("Allow call history access", 0xFF0A84FF.toInt())
+            allow.setOnClickListener {
+                requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), REQ_CALL_LOG)
+            }
+            permissionView.addView(
+                allow,
+                LinearLayout.LayoutParams(-1, dp(56)).apply {
+                    topMargin = dp(16)
+                }
+            )
+            container.addView(permissionView, FrameLayout.LayoutParams(-1, -1))
+            return
+        }
+        showCallLog(container)
+    }
+
+    private fun showDialer(container: FrameLayout) {
+        val dialer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        val dialerWidth = (resources.displayMetrics.widthPixels - dp(48)).coerceAtMost(dp(440))
+        container.addView(
+            dialer,
+            FrameLayout.LayoutParams(dialerWidth, -1, Gravity.CENTER)
+        )
+
+        val number = EditText(this).apply {
+            hint = "Enter phone number"
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+            textSize = 26f
+            gravity = Gravity.CENTER
+            isSingleLine = true
+            showSoftInputOnFocus = false
+            setTextColor(Color.WHITE)
+            setHintTextColor(0xFF88888E.toInt())
+        }
+        dialInput = number
+        dialer.addView(number, LinearLayout.LayoutParams(-1, dp(62)))
+
+        val keypad = GridLayout(this).apply {
+            columnCount = 3
+            rowCount = 4
+        }
+        val keys = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#")
+        keys.forEach { key ->
+            val keyView = utilityButton(key, 0xFF28282C.toInt()).apply {
+                textSize = 24f
+                setOnClickListener {
+                    val cursor = number.selectionStart.coerceAtLeast(0)
+                    number.text.insert(cursor, key)
+                    number.setSelection((cursor + key.length).coerceAtMost(number.length()))
+                }
+            }
+            val params = GridLayout.LayoutParams(
+                GridLayout.spec(GridLayout.UNDEFINED, 1f),
+                GridLayout.spec(GridLayout.UNDEFINED, 1f)
+            ).apply {
+                width = 0
+                height = dp(54)
+                setMargins(dp(4), dp(3), dp(4), dp(3))
+            }
+            keypad.addView(keyView, params)
+        }
+        dialer.addView(keypad, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val delete = utilityButton("Delete", 0xFF28282C.toInt())
+        delete.setOnClickListener {
+            val cursor = number.selectionStart
+            if (cursor > 0) {
+                number.text.delete(cursor - 1, cursor)
+                number.setSelection(cursor - 1)
+            }
+        }
+        val call = utilityButton("Call", 0xFF30D158.toInt())
+        call.setOnClickListener {
+            val enteredNumber = number.text.toString().trim()
+            if (enteredNumber.isBlank()) {
+                Toast.makeText(this, "Enter a phone number first.", Toast.LENGTH_SHORT).show()
+            } else {
+                confirmCall(enteredNumber)
+            }
+        }
+        actions.addView(delete, LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+            marginEnd = dp(8)
+        })
+        actions.addView(call, LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+            marginStart = dp(8)
+        })
+        dialer.addView(actions, LinearLayout.LayoutParams(-1, dp(56)))
+    }
+
+    private fun showCallLog(container: FrameLayout) {
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), dp(4), dp(4), dp(12))
+        }
+        val scroll = ScrollView(this).apply {
+            addView(list)
+        }
+        container.addView(scroll, FrameLayout.LayoutParams(-1, -1))
+
+        val projection = arrayOf(
+            CallLog.Calls.NUMBER,
+            CallLog.Calls.CACHED_NAME,
+            CallLog.Calls.DATE,
+            CallLog.Calls.TYPE
+        )
+        val cursor = try {
+            contentResolver.query(
+                CallLog.Calls.CONTENT_URI,
+                projection,
+                null,
+                null,
+                "${CallLog.Calls.DATE} DESC"
+            )
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "Unable to read call history permission.", Toast.LENGTH_LONG).show()
+            null
+        }
+        if (cursor == null) {
+            list.addView(utilityText("Call history couldn't be loaded.", 18f))
+            return
+        }
+
+        var count = 0
+        cursor.use { calls ->
+            val numberColumn = calls.getColumnIndexOrThrow(CallLog.Calls.NUMBER)
+            val nameColumn = calls.getColumnIndexOrThrow(CallLog.Calls.CACHED_NAME)
+            val dateColumn = calls.getColumnIndexOrThrow(CallLog.Calls.DATE)
+            val typeColumn = calls.getColumnIndexOrThrow(CallLog.Calls.TYPE)
+            while (calls.moveToNext() && count < 50) {
+                val phoneNumber = calls.getString(numberColumn).orEmpty()
+                val contact = calls.getString(nameColumn)?.takeIf { it.isNotBlank() } ?: phoneNumber
+                val timestamp = calls.getLong(dateColumn)
+                val callType = when (calls.getInt(typeColumn)) {
+                    CallLog.Calls.INCOMING_TYPE -> "Incoming"
+                    CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+                    CallLog.Calls.MISSED_TYPE -> "Missed"
+                    CallLog.Calls.REJECTED_TYPE -> "Rejected"
+                    else -> "Call"
+                }
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(16), dp(12), dp(16), dp(12))
+                    background = utilityCardBackground()
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener {
+                        if (phoneNumber.isNotBlank()) confirmCall(phoneNumber)
+                    }
+                }
+                row.addView(utilityText(contact, 18f, bold = true))
+                row.addView(
+                    utilityText(
+                        "$phoneNumber  ·  $callType  ·  ${
+                            DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                                .format(Date(timestamp))
+                        }",
+                        13f,
+                        0xFFB8B8BE.toInt()
+                    )
+                )
+                list.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
+                    bottomMargin = dp(8)
+                })
+                count++
+            }
+        }
+        if (count == 0) list.addView(utilityText("No recent calls.", 18f))
+    }
+
+    private fun confirmCall(number: String) {
+        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Place call?")
+            .setMessage(number)
+            .setPositiveButton("Call") { _, _ -> placeCall(number) }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun placeCall(number: String) {
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) {
+            Toast.makeText(this, "Calling isn't available on this device.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            pendingCallNumber = number
+            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE), REQ_CALL_PHONE)
+            return
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_CALL, Uri.fromParts("tel", number, null)))
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "Phone permission is required to place calls.", Toast.LENGTH_LONG).show()
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "Calling isn't available on this device.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openMessagesPage() {
+        val body = createUtilityPage("Messages", "messages")
+        refreshMessagesPage(body)
+    }
+
+    private fun refreshMessagesPage(body: FrameLayout? = utilityBody) {
+        if (utilityScreen != "messages") return
+        val container = body ?: return
+        container.removeAllViews()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), dp(4), dp(4), dp(12))
+        }
+        val scroll = ScrollView(this).apply {
+            addView(content)
+        }
+        container.addView(scroll, FrameLayout.LayoutParams(-1, -1))
+
+        val refresh = utilityButton("Refresh previews", 0xFF28282C.toInt())
+        refresh.setOnClickListener { refreshMessagesPage() }
+        content.addView(refresh, LinearLayout.LayoutParams(-1, dp(52)).apply {
+            bottomMargin = dp(12)
+        })
+        content.addView(
+            utilityText("Read-only previews from active message notifications.", 14f, 0xFFB8B8BE.toInt())
+        )
+
+        if (!NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)) {
+            val accessButton = utilityButton("Enable notification access", 0xFF0A84FF.toInt())
+            accessButton.setOnClickListener {
+                openIntent(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }
+            content.addView(accessButton, LinearLayout.LayoutParams(-1, dp(56)).apply {
+                topMargin = dp(16)
+            })
+            return
+        }
+
+        val previews = MediaListener.activeListener?.getMessagePreviews().orEmpty()
+        if (previews.isEmpty()) {
+            content.addView(
+                utilityText(
+                    "No active message previews. New previews appear here while their notifications remain active.",
+                    18f
+                ),
+                LinearLayout.LayoutParams(-1, -2).apply {
+                    topMargin = dp(24)
+                }
+            )
+            return
+        }
+
+        previews.forEach { preview ->
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(14), dp(16), dp(14))
+                background = utilityCardBackground()
+            }
+            card.addView(utilityText(preview.title, 18f, bold = true))
+            card.addView(
+                utilityText(
+                    "${preview.source}  ·  ${
+                        DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(preview.timestamp))
+                    }",
+                    13f,
+                    0xFFB8B8BE.toInt()
+                )
+            )
+            card.addView(
+                utilityText(preview.text, 16f),
+                LinearLayout.LayoutParams(-1, -2).apply {
+                    topMargin = dp(8)
+                }
+            )
+            content.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
+                topMargin = dp(10)
+            })
+        }
+    }
+
+    private fun utilityText(
+        value: String,
+        size: Float,
+        color: Int = Color.WHITE,
+        bold: Boolean = false
+    ) = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(color)
+        if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    private fun utilityButton(label: String, color: Int) = utilityText(label, 18f).apply {
+        gravity = Gravity.CENTER
+        background = GradientDrawable().apply {
+            cornerRadius = dp(14).toFloat()
+            setColor(color)
+        }
+        isClickable = true
+        isFocusable = true
+    }
+
+    private fun utilityCardBackground() = GradientDrawable().apply {
+        cornerRadius = dp(16).toFloat()
+        setColor(0xFF1C1C1E.toInt())
     }
 
     private fun openCategory(category: String) {
@@ -987,5 +1461,7 @@ private fun togglePlayback() {
         private const val TAG = "PetalDrive"
         private const val MAP_KEY = "MapViewBundleKey"
         private const val REQ_LOCATION = 1001
+        private const val REQ_CALL_LOG = 1002
+        private const val REQ_CALL_PHONE = 1003
     }
 }
