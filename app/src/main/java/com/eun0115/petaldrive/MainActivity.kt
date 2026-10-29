@@ -995,14 +995,30 @@ class MainActivity : Activity(), OnMapReadyCallback {
         }
         container.addView(scroll, FrameLayout.LayoutParams(-1, -1))
 
-        val refresh = utilityButton("Refresh previews", 0xFF28282C.toInt())
+        val refresh = ImageView(this).apply {
+            setImageResource(R.drawable.ic_refresh)
+            contentDescription = "Refresh messages"
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(0xFF28282C.toInt())
+            }
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            isClickable = true
+            isFocusable = true
+        }
         refresh.setOnClickListener { refreshMessagesPage() }
-        content.addView(refresh, LinearLayout.LayoutParams(-1, dp(52)).apply {
-            bottomMargin = dp(12)
-        })
-        content.addView(
-            utilityText("Read-only previews from active message notifications.", 14f, 0xFFB8B8BE.toInt())
+        val messageHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        messageHeader.addView(
+            utilityText("Read-only message previews", 14f, 0xFFB8B8BE.toInt()),
+            LinearLayout.LayoutParams(0, dp(44), 1f)
         )
+        messageHeader.addView(refresh, LinearLayout.LayoutParams(dp(40), dp(40)))
+        content.addView(messageHeader, LinearLayout.LayoutParams(-1, dp(48)).apply {
+            bottomMargin = dp(8)
+        })
 
         if (!NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)) {
             val accessButton = utilityButton("Enable notification access", 0xFF0A84FF.toInt())

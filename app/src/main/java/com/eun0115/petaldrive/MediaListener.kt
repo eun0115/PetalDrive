@@ -50,7 +50,13 @@ class MediaListener : NotificationListenerService() {
                 ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
                 ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
                 ?: return@mapNotNull null
-            val source = sbn.packageName.substringAfterLast('.')
+            val source = try {
+                packageManager.getApplicationLabel(
+                    packageManager.getApplicationInfo(sbn.packageName, 0)
+                ).toString()
+            } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+                "Messages"
+            }
             val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
                 ?.takeIf { it.isNotBlank() } ?: source
 
