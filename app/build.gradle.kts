@@ -43,6 +43,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("com.huawei.hms:maps:6.11.2.301")
     implementation("com.huawei.hms:maps-basic:6.11.2.301")
