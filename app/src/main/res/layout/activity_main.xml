@@ -6,7 +6,7 @@
     android:orientation="horizontal"
     android:padding="10dp">
 
-    <!-- Left rail: clock, speed, shortcuts, home -->
+    <!-- Left rail: clock, shortcuts, home -->
     <LinearLayout
         android:layout_width="64dp"
         android:layout_height="match_parent"
@@ -22,15 +22,6 @@
             android:textColor="@color/text_primary"
             android:textSize="20sp"
             android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/speed"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:text="@string/speed_default"
-            android:textColor="@color/text_secondary"
-            android:textSize="11sp" />
 
         <Space
             android:layout_width="0dp"
@@ -211,6 +202,7 @@
                 android:layout_height="match_parent"
                 android:layout_marginStart="10dp"
                 android:layout_weight="1"
+                android:gravity="center_vertical"
                 android:orientation="vertical">
 
                 <LinearLayout
@@ -223,7 +215,8 @@
                     android:focusable="true"
                     android:gravity="center_vertical"
                     android:orientation="horizontal"
-                    android:padding="16dp">
+                    android:padding="16dp"
+                    android:visibility="gone">
 
                     <ImageView
                         android:layout_width="40dp"
@@ -260,9 +253,7 @@
                 <LinearLayout
                     android:id="@+id/mediaCard"
                     android:layout_width="match_parent"
-                    android:layout_height="0dp"
-                    android:layout_marginTop="10dp"
-                    android:layout_weight="1.4"
+                    android:layout_height="wrap_content"
                     android:background="@drawable/bg_card"
                     android:orientation="vertical"
                     android:padding="16dp">

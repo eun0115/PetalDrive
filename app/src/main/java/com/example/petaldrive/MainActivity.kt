@@ -66,11 +66,11 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private lateinit var mapView: MapView
     private lateinit var dashboard: View
     private lateinit var dashboardSidePanel: LinearLayout
+    private lateinit var mediaCard: LinearLayout
     private lateinit var gridPage: View
     private lateinit var zoomCol: View
     private lateinit var destBar: View
     private lateinit var destSub: TextView
-    private lateinit var speedText: TextView
     private lateinit var trackTitle: TextView
     private lateinit var trackArtist: TextView
     private lateinit var art: ImageView
@@ -104,14 +104,10 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private var musicArt: ImageView? = null
     private var musicTitle: TextView? = null
     private var musicArtist: TextView? = null
-    private var musicProgress: SeekBar? = null
-    private var musicElapsed: TextView? = null
-    private var musicRemaining: TextView? = null
     private var musicPlay: ImageView? = null
 
     private val musicHandler = Handler(Looper.getMainLooper())
     private val artworkExecutor = Executors.newSingleThreadExecutor()
-    private var draggingProgress = false
     private var draggingDashboardProgress = false
     private var requestedArtworkUri: String? = null
 
@@ -132,14 +128,28 @@ class MainActivity : Activity(), OnMapReadyCallback {
     private fun dp(x: Float) = (x * resources.displayMetrics.density).roundToInt()
 
     private fun updateDashboardSidePanel() {
-        if (!::dashboardSidePanel.isInitialized || dashboard.width == 0) return
+        if (!::dashboardSidePanel.isInitialized || !::mediaCard.isInitialized ||
+            dashboard.width == 0 || dashboard.height == 0
+        ) return
 
         val availableWidthDp = dashboard.width / resources.displayMetrics.density
         val sidePanelWidth = dp((availableWidthDp * 0.34f).coerceIn(200f, 560f))
         val params = dashboardSidePanel.layoutParams as LinearLayout.LayoutParams
+        val availableHeightDp = dashboard.height / resources.displayMetrics.density
+        val cardHeight = dp((availableHeightDp * 0.45f).coerceIn(220f, 360f))
+        val cardParams = mediaCard.layoutParams as LinearLayout.LayoutParams
+        var changed = false
         if (params.width != sidePanelWidth || params.weight != 0f) {
             params.width = sidePanelWidth
             params.weight = 0f
+            changed = true
+        }
+        if (cardParams.height != cardHeight || cardParams.weight != 0f) {
+            cardParams.height = cardHeight
+            cardParams.weight = 0f
+            mediaCard.layoutParams = cardParams
+        }
+        if (changed) {
             dashboardSidePanel.layoutParams = params
         }
     }
@@ -155,6 +165,7 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
         dashboard = v(R.id.dashboard)
         dashboardSidePanel = v(R.id.dashboardSidePanel)
+        mediaCard = v(R.id.mediaCard)
         dashboard.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             updateDashboardSidePanel()
         }
@@ -162,7 +173,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
         zoomCol = v(R.id.zoomCol)
         destBar = v(R.id.destBar)
         destSub = v(R.id.destSub)
-        speedText = v(R.id.speed)
         trackTitle = v(R.id.trackTitle)
         trackArtist = v(R.id.trackArtist)
         art = v(R.id.art)
@@ -178,7 +188,9 @@ class MainActivity : Activity(), OnMapReadyCallback {
         v<View>(R.id.railMusic).setOnClickListener { openMusicPage() }
         v<View>(R.id.mediaCard).setOnClickListener { openMusicPage() }
         v<View>(R.id.railPhone).setOnClickListener { openIntent(Intent(Intent.ACTION_DIAL)) }
-        v<View>(R.id.railHome).setOnClickListener { showGrid() }
+        v<View>(R.id.railHome).setOnClickListener {
+            if (gridPage.visibility == View.VISIBLE) showDashboard() else showGrid()
+        }
 
         // map controls
         v<View>(R.id.zoomIn).setOnClickListener { map?.animateCamera(CameraUpdateFactory.zoomIn()) }
@@ -191,7 +203,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
         v<View>(R.id.destClear).setOnClickListener { clearDestination() }
 
         // cards
-        v<View>(R.id.searchCard).setOnClickListener { showSearch() }
         v<View>(R.id.mediaInfo).setOnClickListener { if (controller == null) askMediaAccess() }
         v<View>(R.id.btnPlay).setOnClickListener {
             controller?.let { c ->
@@ -405,7 +416,6 @@ class MainActivity : Activity(), OnMapReadyCallback {
 
     private fun onFix(loc: Location) {
         lastFix = loc
-        if (loc.hasSpeed()) speedText.text = "${(loc.speed * 3.6f).roundToInt()} km/h"
         if (firstFix) {
             firstFix = false
             center(loc, 16f)
@@ -742,38 +752,6 @@ private fun buildMusicPage() {
         }
     )
 
-    // Playback timeline
-    val progress = SeekBar(this).apply {
-        max = 1000
-        progress = 0
-        isEnabled = false
-        progressTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-        thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-        progressBackgroundTintList =
-            android.content.res.ColorStateList.valueOf(0x66FFFFFF)
-    }
-
-    val times = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-    }
-
-    val elapsed = text("0:00", 12f, 0xFFDDDDDD.toInt())
-    val remaining = text("–0:00", 12f, 0xFFDDDDDD.toInt()).apply {
-        gravity = Gravity.END
-    }
-
-    times.addView(elapsed, LinearLayout.LayoutParams(0, dp(24), 1f))
-    times.addView(remaining, LinearLayout.LayoutParams(0, dp(24), 1f))
-
-    playerControls.addView(
-        progress,
-        LinearLayout.LayoutParams(-1, dp(34)).apply {
-            topMargin = dp(12)
-        }
-    )
-    playerControls.addView(times, LinearLayout.LayoutParams(-1, dp(24)))
-
     // Transport controls
     val controls = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -832,7 +810,7 @@ private fun buildMusicPage() {
     }
 
     artworkFrame.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-        val side = minOf(view.width, view.height)
+        val side = minOf(view.width, view.height, dp(360))
         val params = artwork.layoutParams
         if (side > 0 && (params.width != side || params.height != side)) {
             params.width = side
@@ -880,9 +858,6 @@ private fun buildMusicPage() {
     // Store views for updates from the media session.
     musicTitle = title
     musicArtist = artist
-    musicProgress = progress
-    musicElapsed = elapsed
-    musicRemaining = remaining
     musicPlay = play
 
     close.setOnClickListener { closeMusicPage() }
@@ -932,36 +907,6 @@ private fun buildMusicPage() {
     }
 }
 
-    progress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-        override fun onStartTrackingTouch(seekBar: SeekBar) {
-            draggingProgress = true
-        }
-
-        override fun onProgressChanged(
-            seekBar: SeekBar,
-            value: Int,
-            fromUser: Boolean
-        ) {
-            if (fromUser) {
-                val duration = controller?.metadata
-                    ?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-                val position = duration * value / 1000
-                elapsed.text = formatTime(position)
-                remaining.text = "–${formatTime((duration - position).coerceAtLeast(0))}"
-            }
-        }
-
-        override fun onStopTrackingTouch(seekBar: SeekBar) {
-            val duration = controller?.metadata
-                ?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-            if (duration > 0) {
-                controller?.transportControls?.seekTo(duration * seekBar.progress / 1000)
-            }
-            draggingProgress = false
-            updateMusicProgress()
-        }
-    })
-
     musicPage = page
 
     val root = findViewById<FrameLayout>(android.R.id.content)
@@ -988,9 +933,6 @@ private fun closeMusicPage() {
     musicArt = null
     musicTitle = null
     musicArtist = null
-    musicProgress = null
-    musicElapsed = null
-    musicRemaining = null
     musicPlay = null
     hideSystemBars()
 }
@@ -1007,16 +949,6 @@ private fun togglePlayback() {
     } else {
         c.transportControls.play()
     }
-}
-
-private fun formatTime(ms: Long): String {
-    val seconds = (ms.coerceAtLeast(0) / 1000)
-    return String.format(
-        Locale.getDefault(),
-        "%d:%02d",
-        seconds / 60,
-        seconds % 60
-    )
 }
 
 private fun updateMusicProgress() {
@@ -1039,14 +971,6 @@ private fun updateMusicProgress() {
         } else {
             0
         }
-    }
-    if (!draggingProgress && duration > 0) {
-        musicProgress?.apply {
-            isEnabled = canSeek
-            progress = ((position.coerceIn(0, duration) * 1000) / duration).toInt()
-        }
-        musicElapsed?.text = formatTime(position)
-        musicRemaining?.text = "–${formatTime((duration - position).coerceAtLeast(0))}"
     }
 }
 
